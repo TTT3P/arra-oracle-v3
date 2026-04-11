@@ -1319,6 +1319,26 @@ export function handleLearn(
   // Log the learning
   logLearning(id, pattern, source || 'Oracle Learn', conceptsList);
 
+  // Vector embed (non-blocking, fire-and-forget): add to default bge-m3 collection.
+  // FTS remains authoritative; embed failure doesn't block learn operation.
+  (async () => {
+    try {
+      const store = await ensureVectorStoreConnected('bge-m3');
+      await store.addDocuments([{
+        id,
+        document: content,
+        metadata: {
+          type: 'learning',
+          source_file: `ψ/memory/learnings/${filename}`,
+          concepts: JSON.stringify(conceptsList),
+          ...(resolvedProject && { project: resolvedProject }),
+        },
+      }]);
+    } catch (e) {
+      console.warn(`[handleLearn] Vector embed failed for ${id}:`, e instanceof Error ? e.message : String(e));
+    }
+  })();
+
   return {
     success: true,
     file: `ψ/memory/learnings/${filename}`,

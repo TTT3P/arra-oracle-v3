@@ -11,6 +11,8 @@ import { oracleDocuments } from '../db/schema.ts';
 import { detectProject } from '../server/project-detect.ts';
 import { getVaultPsiRoot } from '../vault/handler.ts';
 import type { ToolContext, ToolResponse, OracleLearnInput } from './types.ts';
+import { logLearning } from '../server/logging.ts';
+import { ensureVectorStoreConnected } from '../vector/factory.ts';
 
 /** Coerce concepts to string[] — handles string, array, or undefined from MCP input */
 export function coerceConcepts(concepts: unknown): string[] {
@@ -185,6 +187,28 @@ export async function handleLearn(ctx: ToolContext, input: OracleLearnInput): Pr
     INSERT INTO oracle_fts (id, content, concepts)
     VALUES (?, ?, ?)
   `).run(id, frontmatter, conceptsList.join(' '));
+
+  logLearning(id, pattern.slice(0, 200), source ?? 'Oracle Learn', conceptsList, project);
+
+  // Vector embed (non-blocking, fire-and-forget): add to default bge-m3 collection.
+  // Failures are logged but don't block the learn operation — FTS remains authoritative.
+  (async () => {
+    try {
+      const store = await ensureVectorStoreConnected('bge-m3');
+      await store.addDocuments([{
+        id,
+        document: frontmatter,
+        metadata: {
+          type: 'learning',
+          source_file: sourceFileRel,
+          concepts: JSON.stringify(conceptsList),
+          ...(project && { project }),
+        },
+      }]);
+    } catch (e) {
+      console.warn(`[arra_learn] Vector embed failed for ${id}:`, e instanceof Error ? e.message : String(e));
+    }
+  })();
 
   return {
     content: [{
