@@ -15,7 +15,7 @@
  */
 
 import type Database from 'bun:sqlite';
-import { and, asc, count, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, count, eq, inArray, lte, sql } from 'drizzle-orm';
 import { drizzle, type BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
 import * as schema from '../db/schema.ts';
 import { indexingJobs } from '../db/schema.ts';
@@ -145,6 +145,30 @@ export function reclaimStaleJob(conn: JobsDb, id: string): void {
     .set({ status: 'pending', claimedAt: null })
     .where(and(eq(indexingJobs.id, id), eq(indexingJobs.status, 'claimed')))
     .run();
+}
+
+/**
+ * Reclaim ALL stale `claimed` jobs in one statement (crash recovery, set-wise).
+ *
+ * A `claimed` row whose `claimed_at` is at/older than `now - olderThanMs` has no
+ * live worker — the daemon that claimed it died mid-job (see `reclaimStaleJob`).
+ * At daemon startup call with `olderThanMs = 0`: before any worker spawns, every
+ * `claimed` row is by definition orphaned. For a periodic mid-run sweep, pass a
+ * threshold comfortably larger than the longest legitimate embed+upsert so a
+ * slow-but-live job is never yanked.
+ *
+ * `attempts` is preserved (a crash-looping job stays counted for retry policy);
+ * terminal `done`/`error`/`pending` rows are never touched. Returns the count.
+ */
+export function reclaimStaleJobs(conn: JobsDb, olderThanMs = 0): number {
+  const db = asDrizzle(conn);
+  const cutoff = Date.now() - Math.max(0, olderThanMs);
+  const rows = db.update(indexingJobs)
+    .set({ status: 'pending', claimedAt: null })
+    .where(and(eq(indexingJobs.status, 'claimed'), lte(indexingJobs.claimedAt, cutoff)))
+    .returning({ id: indexingJobs.id })
+    .all();
+  return rows.length;
 }
 
 export function jobsByStatus(

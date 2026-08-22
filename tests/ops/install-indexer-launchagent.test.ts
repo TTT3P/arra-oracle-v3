@@ -1,0 +1,65 @@
+/**
+ * Phase-4a fix 3 — committed launchd installer for the vector-drain daemon.
+ * Runs scripts/install-indexer-launchagent.sh with INSTALL_ONLY=1 into a temp
+ * LaunchAgent dir (no launchctl bootstrap) and asserts the generated plist is
+ * valid and carries the daemon-specific identity + env — matching the
+ * install-vector-launchagent.sh pattern but for the daemon (INDEXER_PORT, not
+ * VECTOR_PORT; entry src/indexer/daemon.ts; label com.tt3p.arra-indexer).
+ */
+import { afterAll, describe, expect, test } from 'bun:test';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const repoRoot = path.resolve(import.meta.dir, '..', '..');
+const script = path.join(repoRoot, 'scripts', 'install-indexer-launchagent.sh');
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'arra-indexer-install-'));
+afterAll(() => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} });
+
+function runInstaller(): { code: number; plist: string } {
+  const laDir = fs.mkdtempSync(path.join(tmp, 'la-'));
+  const dataDir = fs.mkdtempSync(path.join(tmp, 'data-'));
+  const proc = Bun.spawnSync(['bash', script], {
+    env: {
+      ...process.env,
+      ARRA_INDEXER_INSTALL_ONLY: '1',
+      ARRA_INDEXER_LAUNCHAGENT_DIR: laDir,
+      ARRA_INDEXER_REPO_ROOT: repoRoot,
+      ARRA_INDEXER_BUN_BIN: process.execPath,
+      ORACLE_DATA_DIR: dataDir,
+      ARRA_INDEXER_PORT: '47779',
+    },
+  });
+  const plistPath = path.join(laDir, 'com.tt3p.arra-indexer.plist');
+  return { code: proc.exitCode ?? -1, plist: fs.existsSync(plistPath) ? fs.readFileSync(plistPath, 'utf8') : '' };
+}
+
+describe('install-indexer-launchagent.sh (Phase-4a fix 3)', () => {
+  const { code, plist } = runInstaller();
+
+  test('exits 0 and writes a plist under INSTALL_ONLY', () => {
+    expect(code).toBe(0);
+    expect(plist.length).toBeGreaterThan(0);
+  });
+
+  test('plist is lint-valid (the script self-lints via plutil)', () => {
+    // Reaching INSTALL_ONLY exit 0 means `plutil -lint` already passed in-script;
+    // re-assert the structural essentials here.
+    expect(plist).toContain('<key>Label</key>');
+    expect(plist).toContain('<string>com.tt3p.arra-indexer</string>');
+    expect(plist).toContain('src/indexer/daemon.ts');
+  });
+
+  test('carries daemon identity + env (INDEXER_PORT, not VECTOR_PORT; OLLAMA/DATA_DIR)', () => {
+    expect(plist).toContain('<key>INDEXER_PORT</key>');
+    expect(plist).toContain('<key>OLLAMA_BASE_URL</key>');
+    expect(plist).toContain('<key>ORACLE_DATA_DIR</key>');
+    expect(plist).toContain('<key>ORACLE_VECTOR_DB</key>');
+    expect(plist).not.toContain('VECTOR_PORT');
+  });
+
+  test('KeepAlive.SuccessfulExit=false + RunAtLoad (survives crashes, matches family)', () => {
+    expect(plist).toContain('<key>RunAtLoad</key>');
+    expect(plist).toMatch(/<key>KeepAlive<\/key>\s*<dict>\s*<key>SuccessfulExit<\/key>\s*<false\/>/);
+  });
+});

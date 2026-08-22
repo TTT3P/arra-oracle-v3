@@ -22,6 +22,17 @@ export interface UpsertVectorDeps {
   /** Model presets keyed by model key; only `collection` is read. */
   models: Record<string, { collection: string }>;
   getStore: (modelKey: string) => Promise<UpsertCapableStore>;
+  /**
+   * Full provenance metadata for a doc id (type, tenant_id, source_file,
+   * concepts, project, …) — the same shape the inline index path writes.
+   * Without it a daemon re-embed writes only `{id, indexed_at}`, and because the
+   * LanceDB adapter merges with `whenMatchedUpdateAll` on a single opaque
+   * `metadata` JSON string, that BLOWS AWAY provenance/type/tenant on the
+   * existing row (breaking metadata filters + result shaping). Optional so tests
+   * can omit it; the daemon always wires it. Returns `null`/`undefined` for an
+   * unknown id (falls back to the minimal metadata).
+   */
+  getDocMeta?: (docId: string) => Record<string, string | number> | null | undefined;
   /** Injectable for tests. Defaults to `Date.now`. */
   now?: () => number;
 }
@@ -63,8 +74,12 @@ export function makeUpsertVector(deps: UpsertVectorDeps): UpsertVector {
     }
 
     const store = await deps.getStore(modelKey);
+    // Preserve the doc's full provenance metadata; `whenMatchedUpdateAll`
+    // replaces the whole `metadata` blob on a re-embed, so the reduced
+    // `{id, indexed_at}` alone would erase type/tenant_id/source_file/concepts.
+    const base = deps.getDocMeta?.(docId) ?? {};
     await store.addDocuments([
-      { id: docId, document: text, vector, metadata: { id: docId, indexed_at: now() } },
+      { id: docId, document: text, vector, metadata: { ...base, id: docId, indexed_at: now() } },
     ]);
   };
 }
