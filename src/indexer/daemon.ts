@@ -16,9 +16,10 @@
 import { Elysia } from 'elysia';
 import { eq } from 'drizzle-orm';
 import { DB_PATH, REPO_ROOT } from '../config.ts';
-import { createDatabase, oracleFts } from '../db/index.ts';
+import { createDatabase, oracleDocuments, oracleFts } from '../db/index.ts';
 import { createVectorStoreForModel, getEmbeddingModels } from '../vector/factory.ts';
 import { runWorker, type WorkerEvent } from './worker.ts';
+import { reclaimStaleJobs } from './jobs.ts';
 import { makeUpsertVector } from './upsert-vector.ts';
 import { daemonApiPlugin, makeEventBus } from '../routes/indexer-daemon/index.ts';
 import { startLearnWatcher, type StopWatch } from './learn-watcher.ts';
@@ -43,6 +44,32 @@ export async function startDaemon(): Promise<void> {
       .where(eq(oracleFts.id, docId))
       .get();
     return row?.content ?? null;
+  };
+
+  // Full provenance metadata for a re-embed, mirroring the inline index path
+  // (storage.ts) so `whenMatchedUpdateAll` does not erase type/tenant/source_file/
+  // concepts/project from an existing row. concepts is stored as a JSON array —
+  // normalise to the comma-joined shape the inline path and metadata filters use.
+  const getDocMeta = (docId: string): Record<string, string | number> | null => {
+    const row = db.select({
+      type: oracleDocuments.type,
+      tenantId: oracleDocuments.tenantId,
+      sourceFile: oracleDocuments.sourceFile,
+      concepts: oracleDocuments.concepts,
+      project: oracleDocuments.project,
+    }).from(oracleDocuments).where(eq(oracleDocuments.id, docId)).get();
+    if (!row) return null;
+    const meta: Record<string, string | number> = {
+      type: row.type,
+      tenant_id: row.tenantId,
+      source_file: row.sourceFile,
+    };
+    if (row.concepts) {
+      try { const c = JSON.parse(row.concepts); meta.concepts = Array.isArray(c) ? c.join(',') : String(row.concepts); }
+      catch { meta.concepts = String(row.concepts); }
+    }
+    if (row.project) meta.project = row.project;
+    return meta;
   };
 
   // Embed via the existing factory — produces a model-aware OllamaEmbeddings.
@@ -74,7 +101,21 @@ export async function startDaemon(): Promise<void> {
   // Stores the document's real text alongside its precomputed vector, and deletes before
   // adding so a re-index replaces the row instead of appending. Extracted to its own module
   // because it is untestable from here — that is why #2806 survived on both branches.
-  const upsertVector = makeUpsertVector({ models, getStore });
+  const upsertVector = makeUpsertVector({ models, getStore, getDocMeta });
+
+  // Crash recovery (Phase-4a): a worker that dies between claim and done leaves
+  // its row `status='claimed'` forever — claimNextJob only sees `pending`. At
+  // startup no worker is running yet, so every `claimed` row is orphaned →
+  // reclaim all; then sweep periodically for a sibling worker that crashes while
+  // the daemon lives (age threshold > the longest legitimate embed+upsert).
+  const bootReclaimed = reclaimStaleJobs(sqlite, 0);
+  if (bootReclaimed > 0) console.log(`[arra-indexer] reclaimed ${bootReclaimed} orphaned claimed job(s) at startup`);
+  const STALE_RECLAIM_MS = parseInt(process.env.INDEXER_STALE_RECLAIM_MS || '300000', 10);
+  const reclaimTimer = setInterval(() => {
+    if (shuttingDown) return;
+    const n = reclaimStaleJobs(sqlite, STALE_RECLAIM_MS);
+    if (n > 0) console.log(`[arra-indexer] reclaimed ${n} stale claimed job(s) (>${STALE_RECLAIM_MS}ms)`);
+  }, STALE_RECLAIM_MS);
 
   const workerPromises: Promise<unknown>[] = [];
   for (const modelKey of Object.keys(models)) {
@@ -120,6 +161,7 @@ export async function startDaemon(): Promise<void> {
   const shutdown = async (signal: string) => {
     console.log(`[arra-indexer] ${signal} — draining…`);
     shuttingDown = true;
+    clearInterval(reclaimTimer);
     stopLearnWatcher?.();
     stopLearnWatcher = undefined;
     await app.stop();
