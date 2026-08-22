@@ -51,9 +51,11 @@ xml_escape() {
 # something else holds :$PORT — silently "scheduling for next login" (the
 # vector-installer quirk, RUNBOOK §3) would leave the operator believing the
 # daemon is installed while a stranger serves the port. Refuse instead.
+LAUNCHCTL="${ARRA_INDEXER_LAUNCHCTL:-launchctl}"
+HEALTH_TRIES="${ARRA_INDEXER_HEALTH_TRIES:-40}"
 domain="gui/$(id -u)"
 port_pids="$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)"
-if [[ -n "$port_pids" ]] && ! launchctl print "$domain/$LABEL" >/dev/null 2>&1; then
+if [[ -n "$port_pids" ]] && ! $LAUNCHCTL print "$domain/$LABEL" >/dev/null 2>&1; then
   echo "error: port $PORT is held by a foreign process (pids: ${port_pids//$'\n'/ }); refusing to install $LABEL" >&2
   exit 1
 fi
@@ -113,33 +115,57 @@ PLIST
 
 plutil -lint "$tmp_plist" >/dev/null
 chmod 0644 "$tmp_plist"
+# Back up any prior plist BEFORE overwrite, so a failed health check can restore
+# the pre-install state (upgrade) rather than leaving a broken new one.
+prior_plist_backup=""
+prior_existed=0
+if [[ -f "$PLIST_PATH" ]]; then
+  prior_existed=1
+  prior_plist_backup="$(mktemp "${TMPDIR:-/tmp}/.${LABEL}.prior.XXXXXX")"
+  cp "$PLIST_PATH" "$prior_plist_backup"
+fi
 mv "$tmp_plist" "$PLIST_PATH"
 trap - EXIT
 
 echo "installed: $PLIST_PATH"
 if [[ "$INSTALL_ONLY" == "1" ]]; then
+  rm -f "$prior_plist_backup"
   exit 0
 fi
 
-# We already fail-closed above if a foreign process owns the port. Here the port
-# is either free or held by our own managed label — bootout our own before reload.
-if launchctl print "$domain/$LABEL" >/dev/null 2>&1; then
-  launchctl bootout "$domain/$LABEL"
+# Rollback the file layer to the pre-install state on failure: a fresh install
+# removes the newly-written plist; an upgrade restores the prior plist (and
+# reboots it). Never leave a broken new plist behind.
+rollback_and_die() {
+  $LAUNCHCTL bootout "$domain/$LABEL" >/dev/null 2>&1 || true
+  if [[ "$prior_existed" == "1" ]]; then
+    mv "$prior_plist_backup" "$PLIST_PATH"
+    $LAUNCHCTL bootstrap "$domain" "$PLIST_PATH" >/dev/null 2>&1 || true
+    $LAUNCHCTL kickstart -k "$domain/$LABEL" >/dev/null 2>&1 || true
+    echo "error: $LABEL $1; restored + rebooted the prior plist. Inspect $DATA_DIR/arra-indexer.error.log" >&2
+  else
+    rm -f "$PLIST_PATH"
+    echo "error: $LABEL $1; removed the newly-installed plist. Inspect $DATA_DIR/arra-indexer.error.log" >&2
+  fi
+  exit 1
+}
+
+# Port is free or held by our own managed label — bootout our own before reload.
+if $LAUNCHCTL print "$domain/$LABEL" >/dev/null 2>&1; then
+  $LAUNCHCTL bootout "$domain/$LABEL"
 fi
-launchctl bootstrap "$domain" "$PLIST_PATH"
-launchctl kickstart -k "$domain/$LABEL"
-launchctl print "$domain/$LABEL" >/dev/null
+$LAUNCHCTL bootstrap "$domain" "$PLIST_PATH" || rollback_and_die "failed to bootstrap"
+$LAUNCHCTL kickstart -k "$domain/$LABEL" || rollback_and_die "failed to kickstart"
+$LAUNCHCTL print "$domain/$LABEL" >/dev/null 2>&1 || true
 # Identity-validate health: any 2xx is not enough — the response must be OUR
 # daemon (`service: arra-indexer`), else a stranger on the port would pass.
-for _ in {1..40}; do
+for _ in $(seq 1 "$HEALTH_TRIES"); do
   body="$(/usr/bin/curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null || true)"
   if [[ "$body" == *'"service":"arra-indexer"'* ]]; then
+    rm -f "$prior_plist_backup"
     echo "running: $LABEL (http://127.0.0.1:$PORT)"
     exit 0
   fi
   sleep 0.25
 done
-# Rollback: do not leave a broken managed job loaded.
-launchctl bootout "$domain/$LABEL" >/dev/null 2>&1 || true
-echo "error: $LABEL loaded but /health did not identify as arra-indexer; booted out. Inspect $DATA_DIR/arra-indexer.error.log" >&2
-exit 1
+rollback_and_die "loaded but /health did not identify as arra-indexer"

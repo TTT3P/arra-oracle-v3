@@ -78,3 +78,47 @@ describe('install-indexer-launchagent.sh — fail-closed on foreign port owner',
     }
   });
 });
+
+// Stub launchctl: `print` → not-loaded (exit 1); every other subcommand → no-op
+// (exit 0). With no real daemon on the (free) port, the identity health check
+// never passes → the rollback path runs.
+function stubLaunchctl(): string {
+  const p = path.join(tmp, `launchctl-stub-${Math.random().toString(36).slice(2)}.sh`);
+  fs.writeFileSync(p, '#!/bin/bash\nif [[ "$1" == "print" ]]; then exit 1; fi\nexit 0\n', { mode: 0o755 });
+  return p;
+}
+function freePort(): string {
+  const s = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() });
+  const port = s.port; s.stop(true); return String(port);
+}
+function runFull(env: Record<string, string>): { code: number; laDir: string; plistPath: string } {
+  const laDir = fs.mkdtempSync(path.join(tmp, 'la-'));
+  const dataDir = fs.mkdtempSync(path.join(tmp, 'data-'));
+  const plistPath = path.join(laDir, 'com.tt3p.arra-indexer.plist');
+  if (env.__PRIOR__) fs.writeFileSync(plistPath, env.__PRIOR__);
+  const proc = Bun.spawnSync(['bash', script], {
+    env: {
+      ...process.env,
+      ARRA_INDEXER_LAUNCHAGENT_DIR: laDir, ARRA_INDEXER_REPO_ROOT: repoRoot,
+      ARRA_INDEXER_BUN_BIN: process.execPath, ORACLE_DATA_DIR: dataDir,
+      ARRA_INDEXER_PORT: freePort(), ARRA_INDEXER_LAUNCHCTL: stubLaunchctl(), ARRA_INDEXER_HEALTH_TRIES: '1',
+    },
+  });
+  return { code: proc.exitCode ?? -1, laDir, plistPath };
+}
+
+describe('install-indexer-launchagent.sh — health-failure rollback', () => {
+  test('FRESH install: health fails → exit non-zero AND the new plist is removed (no broken plist left)', () => {
+    const r = runFull({});
+    expect(r.code).not.toBe(0);
+    expect(fs.existsSync(r.plistPath)).toBe(false);   // rolled back to pre-install (nothing)
+  });
+
+  test('UPGRADE: health fails → exit non-zero AND the PRIOR plist is restored (not the new one)', () => {
+    const priorMarker = '<?xml version="1.0"?><!-- PRIOR-PLIST-SENTINEL -->';
+    const r = runFull({ __PRIOR__: priorMarker });
+    expect(r.code).not.toBe(0);
+    expect(fs.existsSync(r.plistPath)).toBe(true);      // prior restored, not removed
+    expect(fs.readFileSync(r.plistPath, 'utf8')).toBe(priorMarker);
+  });
+});
