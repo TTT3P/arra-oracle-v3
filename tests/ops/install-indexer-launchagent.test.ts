@@ -16,7 +16,7 @@ const script = path.join(repoRoot, 'scripts', 'install-indexer-launchagent.sh');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'arra-indexer-install-'));
 afterAll(() => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} });
 
-function runInstaller(): { code: number; plist: string } {
+function runInstaller(opts: { port?: string } = {}): { code: number; stderr: string; plistExists: boolean; plist: string } {
   const laDir = fs.mkdtempSync(path.join(tmp, 'la-'));
   const dataDir = fs.mkdtempSync(path.join(tmp, 'data-'));
   const proc = Bun.spawnSync(['bash', script], {
@@ -27,11 +27,12 @@ function runInstaller(): { code: number; plist: string } {
       ARRA_INDEXER_REPO_ROOT: repoRoot,
       ARRA_INDEXER_BUN_BIN: process.execPath,
       ORACLE_DATA_DIR: dataDir,
-      ARRA_INDEXER_PORT: '47779',
+      ARRA_INDEXER_PORT: opts.port ?? '47779',
     },
   });
   const plistPath = path.join(laDir, 'com.tt3p.arra-indexer.plist');
-  return { code: proc.exitCode ?? -1, plist: fs.existsSync(plistPath) ? fs.readFileSync(plistPath, 'utf8') : '' };
+  const plistExists = fs.existsSync(plistPath);
+  return { code: proc.exitCode ?? -1, stderr: proc.stderr.toString(), plistExists, plist: plistExists ? fs.readFileSync(plistPath, 'utf8') : '' };
 }
 
 describe('install-indexer-launchagent.sh (Phase-4a fix 3)', () => {
@@ -61,5 +62,19 @@ describe('install-indexer-launchagent.sh (Phase-4a fix 3)', () => {
   test('KeepAlive.SuccessfulExit=false + RunAtLoad (survives crashes, matches family)', () => {
     expect(plist).toContain('<key>RunAtLoad</key>');
     expect(plist).toMatch(/<key>KeepAlive<\/key>\s*<dict>\s*<key>SuccessfulExit<\/key>\s*<false\/>/);
+  });
+});
+
+describe('install-indexer-launchagent.sh — fail-closed on foreign port owner', () => {
+  test('a foreign listener on the port makes the installer EXIT NON-ZERO with NO plist written', async () => {
+    const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('not the daemon') });
+    try {
+      const r = runInstaller({ port: String(server.port) });
+      expect(r.code).not.toBe(0);              // fail closed
+      expect(r.plistExists).toBe(false);        // no plist mutation before the refusal
+      expect(r.stderr).toContain('foreign process');
+    } finally {
+      server.stop(true);
+    }
   });
 });

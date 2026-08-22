@@ -46,6 +46,18 @@ xml_escape() {
     -e "s/'/\&apos;/g"
 }
 
+# Fail CLOSED before any plist mutation if a FOREIGN process owns the port. A
+# listener that is not our managed label (which we would bootout+replace) means
+# something else holds :$PORT — silently "scheduling for next login" (the
+# vector-installer quirk, RUNBOOK §3) would leave the operator believing the
+# daemon is installed while a stranger serves the port. Refuse instead.
+domain="gui/$(id -u)"
+port_pids="$(lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null || true)"
+if [[ -n "$port_pids" ]] && ! launchctl print "$domain/$LABEL" >/dev/null 2>&1; then
+  echo "error: port $PORT is held by a foreign process (pids: ${port_pids//$'\n'/ }); refusing to install $LABEL" >&2
+  exit 1
+fi
+
 BUN_DIR="$(dirname "$BUN_BIN")"
 mkdir -p "$LAUNCH_AGENT_DIR" "$DATA_DIR"
 tmp_plist="$(mktemp "$LAUNCH_AGENT_DIR/.${LABEL}.XXXXXX")"
@@ -109,22 +121,25 @@ if [[ "$INSTALL_ONLY" == "1" ]]; then
   exit 0
 fi
 
-domain="gui/$(id -u)"
+# We already fail-closed above if a foreign process owns the port. Here the port
+# is either free or held by our own managed label — bootout our own before reload.
 if launchctl print "$domain/$LABEL" >/dev/null 2>&1; then
   launchctl bootout "$domain/$LABEL"
-elif lsof -tiTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "scheduled: $LABEL will start at next login; existing listener on port $PORT retained"
-  exit 0
 fi
 launchctl bootstrap "$domain" "$PLIST_PATH"
 launchctl kickstart -k "$domain/$LABEL"
 launchctl print "$domain/$LABEL" >/dev/null
+# Identity-validate health: any 2xx is not enough — the response must be OUR
+# daemon (`service: arra-indexer`), else a stranger on the port would pass.
 for _ in {1..40}; do
-  if /usr/bin/curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+  body="$(/usr/bin/curl -fsS "http://127.0.0.1:$PORT/health" 2>/dev/null || true)"
+  if [[ "$body" == *'"service":"arra-indexer"'* ]]; then
     echo "running: $LABEL (http://127.0.0.1:$PORT)"
     exit 0
   fi
   sleep 0.25
 done
-echo "error: $LABEL loaded but failed its health check; inspect $DATA_DIR/arra-indexer.error.log" >&2
+# Rollback: do not leave a broken managed job loaded.
+launchctl bootout "$domain/$LABEL" >/dev/null 2>&1 || true
+echo "error: $LABEL loaded but /health did not identify as arra-indexer; booted out. Inspect $DATA_DIR/arra-indexer.error.log" >&2
 exit 1
