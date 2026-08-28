@@ -36,12 +36,13 @@ log "START db=$DB dest=$DEST"
 # 2. integrity_check on the COPY (never the live DB)
 IC="$("$SQLITE" "$DEST" 'PRAGMA integrity_check;' 2>&1 | head -1)"
 [ "$IC" = "ok" ] || fail "integrity_check on copy != ok: $IC"
+rm -f "$DEST-shm" "$DEST-wal" 2>/dev/null || true   # drop transient WAL sidecars the check-open created
 log "OK integrity_check=ok size=$(fsize "$DEST") $DEST"
 
 # 3. retention: keep newest KEEP_DAILY + newest-per-ISO-week for KEEP_WEEKLY weeks
 prune_retention(){
   local all keep seen wk stamp f wk_count
-  all="$(ls -1 "$BACKUP_DIR"/oracle.db.* 2>/dev/null | sort -r)" || return 0
+  all="$(ls -1 "$BACKUP_DIR"/oracle.db.*Z 2>/dev/null | sort -r)" || return 0   # stamped .db only (…Z), never -shm/-wal
   [ -z "$all" ] && return 0
   keep="$(mktemp)"; printf '%s\n' "$all" | head -n "$KEEP_DAILY" > "$keep"
   seen=" "; wk_count=0
