@@ -1,9 +1,21 @@
 import { augmentQueryWithAcronyms } from '../../search/acronyms.ts';
+import { combineResults as sharedCombineResults } from '../../search/fusion.ts';
+import { normalizeRank } from '../../search/fts-rank.ts';
 import type { CombinedSearchResult, FtsResult, PointerResult, SearchConfidence, SearchProvenance, VectorResult } from './types.ts';
 
+/** Re-exports the shared FTS+vector(+pointer) fusion — see search/fusion.ts. */
+export function combineResults(
+  ftsResults: FtsResult[],
+  vectorResults: VectorResult[],
+  ftsWeight = 0.5,
+  vectorWeight = 0.5,
+  pointerResults: PointerResult[] = [],
+  pointerWeight = 0.35,
+): CombinedSearchResult[] {
+  return sharedCombineResults(ftsResults, vectorResults, ftsWeight, vectorWeight, pointerResults, pointerWeight) as CombinedSearchResult[];
+}
+
 const FTS_TOKEN_LIMIT = 32;
-const FTS_SCORE_FLOOR = 0.9;
-const FTS_SCORE_CEILING = 0.95;
 
 /** Sanitize FTS5 query to prevent parse errors. */
 export function sanitizeFtsQuery(query: string): string {
@@ -20,12 +32,11 @@ export function sanitizeFtsQuery(query: string): string {
     .join(' OR ');
 }
 
-/** Normalize FTS5 BM25 rank to bounded relevance (more-negative rank is better). */
-export function normalizeFtsScore(rank: number): number {
-  if (!Number.isFinite(rank)) return 0;
-  const relevance = 1 - Math.exp(-0.3 * Math.max(0, -rank));
-  return FTS_SCORE_FLOOR + ((FTS_SCORE_CEILING - FTS_SCORE_FLOOR) * relevance);
-}
+/** Normalize FTS5 bm25 rank to bounded relevance — delegates to the shared
+ *  normalizer so the HTTP and MCP/local paths score identically (HTTP/local
+ *  parity). This impl was already correct; the HTTP copies were the inverted
+ *  ones now pointed at the same function. See search/fts-rank.ts. */
+export const normalizeFtsScore = normalizeRank;
 
 export function parseConceptsFromMetadata(concepts: unknown): string[] {
   if (!concepts) return [];
@@ -39,90 +50,6 @@ export function parseConceptsFromMetadata(concepts: unknown): string[] {
     }
   }
   return [];
-}
-
-export function combineResults(
-  ftsResults: FtsResult[],
-  vectorResults: VectorResult[],
-  ftsWeight = 0.5,
-  vectorWeight = 0.5,
-  pointerResults: PointerResult[] = [],
-  pointerWeight = 0.35,
-): CombinedSearchResult[] {
-  const resultMap = new Map<string, Omit<CombinedSearchResult, 'score'> & {
-    ftsScore?: number;
-    vectorScore?: number;
-    pointerScore?: number;
-  }>();
-
-  for (const result of ftsResults) {
-    resultMap.set(result.id, {
-      id: result.id,
-      type: result.type,
-      content: result.content,
-      source_file: result.source_file,
-      concepts: result.concepts,
-      ftsScore: result.score,
-      source: 'fts',
-    });
-  }
-
-  for (const result of pointerResults) {
-    const existing = resultMap.get(result.id);
-    if (existing) {
-      existing.pointerScore = result.pointerScore;
-      existing.pointerMatches = result.pointerMatches;
-      existing.source = existing.source === 'pointer' ? 'pointer' : 'hybrid';
-      continue;
-    }
-    resultMap.set(result.id, {
-      id: result.id,
-      type: result.type,
-      content: result.content,
-      source_file: result.source_file,
-      concepts: result.concepts,
-      pointerScore: result.pointerScore,
-      pointerMatches: result.pointerMatches,
-      source: 'pointer',
-    });
-  }
-
-  for (const result of vectorResults) {
-    const existing = resultMap.get(result.id);
-    if (existing) {
-      existing.vectorScore = result.score;
-      existing.source = 'hybrid';
-      existing.distance = result.distance;
-      existing.model = result.model;
-      continue;
-    }
-    resultMap.set(result.id, {
-      id: result.id,
-      type: result.type,
-      content: result.content,
-      source_file: result.source_file,
-      concepts: result.concepts,
-      vectorScore: result.score,
-      distance: result.distance,
-      model: result.model,
-      source: 'vector',
-    });
-  }
-
-  const combined = Array.from(resultMap.values()).map((result) => {
-    const base = result.source === 'hybrid'
-      ? ((ftsWeight * (result.ftsScore ?? 0)) + (vectorWeight * (result.vectorScore ?? 0))) * 1.1
-      : result.source === 'fts'
-        ? (result.ftsScore ?? 0) * ftsWeight
-        : result.source === 'vector'
-          ? (result.vectorScore ?? 0) * vectorWeight
-          : (result.pointerScore ?? 0) * 0.7;
-    const score = Math.min(1, base + ((result.source === 'pointer' ? 0 : pointerWeight) * (result.pointerScore ?? 0)));
-    return { ...result, score };
-  });
-
-  combined.sort((a, b) => b.score - a.score);
-  return combined;
 }
 
 /**

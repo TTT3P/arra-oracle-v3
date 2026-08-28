@@ -14,10 +14,12 @@ import type { VectorStoreAdapter } from '../vector/types.ts';
 import { defaultMcpToolOrder, mcpToolByName, mcpTools, toMcpToolDefinition, type RuntimeMcpToolManifest } from '../tools/mcp-manifest.ts';
 import type { UnifiedRuntime } from '../plugins/unified-loader.ts';
 import type { EmbeddedDeps, OracleMCPServerOptions } from './server-options.ts';
+import { setServerCapabilityReport } from './capability.ts';
 import { probeVectorStore } from './vector-health.ts';
 import { formatEmbedderDegradedWarning, probeConfiguredEmbedder, readEmbedderRuntimeStatus, setEmbedderRuntimeStatus, type EmbedderRuntimeStatus } from '../vector/embedder-config.ts';
 import { resolveInboundToolName, retiredAliasNotice } from './aliases.ts';
-import { proxyToolCall, resolveOracleApiBase } from './http-proxy.ts';
+import type { GuideToolSummary } from './guide.ts';
+import { proxyToolCall, resolveOracleApiBase, resolveRemoteWriteApiBase } from './http-proxy.ts';
 import { pluginMcpToolsFrom } from './plugin-tools.ts';
 import { runWithTenant } from '../middleware/tenant.ts';
 import { stripMcpTenantArgs, tenantIdFromMcpArgs } from './tenant.ts';
@@ -34,6 +36,7 @@ export class OracleMCPServer {
   private vectorStatus: ToolContext['vectorStatus'] = 'unknown';
   private vectorReason: string | undefined; private embedderProvider: string | undefined; private lastEmbedderWarning: string | undefined;
   private readOnly: boolean;
+  private readonly profile: 'read-mostly' | 'delegate' | 'owner';
   private version = pkg.version;
   private disabledTools = new Set<string>();
   private enabledToolNames: string[] = [];
@@ -42,17 +45,62 @@ export class OracleMCPServer {
   private stopToolGroupsWatch: (() => void) | null = null;
   private embeddedReady: Promise<void> | null = null;
   private readonly oracleApiBase: string | null;
+  private readonly remoteWriteApiBase: string | null;
   private readonly unifiedRuntime: McpPluginRuntime;
   private readonly embeddedDeps?: EmbeddedDeps | Promise<EmbeddedDeps>;
   private readonly watchToolGroups: typeof watchToolGroupConfig;
   private readonly toolAllowlist: ReadonlySet<string> | null;
   constructor(options: OracleMCPServerOptions = {}) {
-    this.readOnly = options.readOnly ?? false;
+    this.profile = options.profile ?? 'read-mostly';
+    // Delegate implies read-only regardless of the caller's readOnly value —
+    // a worker seat must not become writable through a second option path.
+    this.readOnly = this.profile === 'delegate'
+      ? true
+      : this.profile === 'owner'
+        ? false
+        : (options.readOnly ?? false);
     this.embeddedDeps = options.embeddedDeps;
     this.watchToolGroups = options.watchToolGroups ?? watchToolGroupConfig;
     this.toolAllowlist = options.toolAllowlist ? new Set(options.toolAllowlist) : null;
-    if (this.readOnly) console.error('[Oracle] Running in READ-ONLY mode');
-    this.oracleApiBase = resolveOracleApiBase();
+    // Delegate never resolves a proxy or owner-core base: with both null the
+    // existing readOnly filter hides every readOnly:false tool, index_retro
+    // included, with no environment default able to re-enable it (spec v5
+    // blocker 5 — the launcher line-31 default must not reach a delegate).
+    this.oracleApiBase = this.profile === 'delegate' ? null : resolveOracleApiBase();
+    this.remoteWriteApiBase = this.profile === 'delegate' || this.profile === 'owner'
+      ? null
+      : resolveRemoteWriteApiBase();
+    if (this.profile === 'owner' && !this.oracleApiBase) {
+      throw new Error('ORACLE_PROFILE=owner requires ORACLE_HTTP_URL for the single owner-core write path');
+    }
+    if (this.profile === 'delegate' && process.env.ORACLE_MEMORY_OWNER_ROOT) {
+      // A delegate owns no ψ (birth spec v5 D1): an owner root reaching this
+      // process is a launch-path defect, so drop it rather than honor it.
+      console.error('[Oracle] DELEGATE seat received ORACLE_MEMORY_OWNER_ROOT — ignoring it (delegates own no memory root)');
+      delete process.env.ORACLE_MEMORY_OWNER_ROOT;
+    }
+    setServerCapabilityReport({
+      profile: this.profile,
+      readOnly: this.readOnly,
+      remoteWriteApiBase: this.remoteWriteApiBase,
+      oracleApiBase: this.oracleApiBase,
+      memoryOwnerRoot: this.profile === 'delegate'
+        ? null
+        : process.env.ORACLE_MEMORY_OWNER_ROOT?.trim() || null,
+    });
+    if (this.profile === 'delegate') {
+      console.error('[Oracle] Running in DELEGATE mode (no-retro worker seat: write tools structurally absent; ORACLE_REMOTE_WRITE_URL and ORACLE_HTTP_URL ignored)');
+    }
+    if (this.profile === 'owner') {
+      console.error(`[Oracle] Running in OWNER mode (full approved tool surface → ${this.oracleApiBase})`);
+    }
+    if (this.readOnly) {
+      // Transparency (Riddler Oracle101 compare 2026-08-18): a seat holding the
+      // bounded exception is read-mostly, not strictly read-only — say so.
+      console.error(this.remoteWriteApiBase
+        ? `[Oracle] Running in READ-ONLY mode with bounded retro-index exception (oracle_index_retro → ${this.remoteWriteApiBase})`
+        : '[Oracle] Running in READ-ONLY mode');
+    }
     console.error(this.oracleApiBase
       ? `[Oracle] Running in HTTP-proxy mode (ORACLE_HTTP_URL → ${this.oracleApiBase})`
       : '[Oracle] Running in embedded mode (ORACLE_HTTP_URL unset)');
@@ -114,7 +162,10 @@ export class OracleMCPServer {
       if (embedderStatus.status !== 'degraded') throw error;
       this.vectorStore = createFtsOnlyVectorStore(embedderStatus.reason ?? 'embedder unavailable');
     }
-    const { sqlite, db } = createDatabase(DB_PATH, { readonly: this.readOnly });
+    // HTTP-proxy owners keep the HTTP process as the sole write owner. Local-only
+    // helpers such as oracle_recap may still need embedded reads, but this MCP
+    // process must never open a second writable database connection.
+    const { sqlite, db } = createDatabase(DB_PATH, { readonly: this.readOnly || !!this.oracleApiBase });
     this.sqlite = sqlite;
     this.db = db;
     await this.verifyVectorHealth();
@@ -165,6 +216,15 @@ export class OracleMCPServer {
     return !this.toolAllowlist || this.toolAllowlist.has(tool.name);
   }
 
+  /**
+   * TINE-ratified read-only exception (2026-08-18): a remoteWriteSafe tool is
+   * usable from a read-only seat only when an HTTP owner core is configured —
+   * the write happens in the owner core, never against the local readonly DB.
+   */
+  private remoteWriteAllowed(tool: RuntimeMcpToolManifest): boolean {
+    return tool.remoteWriteSafe === true && !!(this.oracleApiBase || this.remoteWriteApiBase);
+  }
+
   private async availableTools() {
     const registry = await this.toolRegistry();
     const configured = defaultMcpToolOrder(this.enabledToolNames);
@@ -176,7 +236,16 @@ export class OracleMCPServer {
       .filter((tool): tool is RuntimeMcpToolManifest => !!tool)
       .filter((tool) => this.isAllowed(tool))
       .filter((tool) => !this.isDisabled(tool))
-      .filter((tool) => !this.readOnly || tool.readOnly !== false);
+      .filter((tool) => !this.readOnly || tool.readOnly !== false || this.remoteWriteAllowed(tool));
+  }
+
+  private async availableToolSummaries(): Promise<GuideToolSummary[]> {
+    return (await this.availableTools()).map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      readOnly: tool.readOnly !== false,
+      remoteWriteSafe: tool.remoteWriteSafe === true,
+    }));
   }
 
   private setupHandlers(): void {
@@ -201,7 +270,7 @@ export class OracleMCPServer {
       if (this.isDisabled(tool)) {
         return errorResponse(`Error: Tool "${toolName}" is disabled by tool group config. Check ${ORACLE_DATA_DIR}/config.json or arra.config.json.`);
       }
-      if (this.readOnly && tool.readOnly === false) {
+      if (this.readOnly && tool.readOnly === false && !this.remoteWriteAllowed(tool)) {
         return errorResponse(`Error: Tool "${toolName}" is disabled in read-only mode. This Oracle instance is configured for read-only access.`);
       }
       try {
@@ -210,9 +279,22 @@ export class OracleMCPServer {
           : {};
         const tenantId = tenantIdFromMcpArgs(rawArgs);
         const args = stripMcpTenantArgs(rawArgs);
-        const proxied = await proxyToolCall(this.oracleApiBase, toolName, args, tenantId);
+        // ORACLE_REMOTE_WRITE_URL applies ONLY to remoteWriteSafe tools on a
+        // read-only seat — it must never flip search/read into proxy mode.
+        const proxyBase = this.oracleApiBase
+          ?? (this.readOnly && tool.remoteWriteSafe === true ? this.remoteWriteApiBase : null);
+        const proxied = await proxyToolCall(proxyBase, toolName, args, tenantId);
         if (proxied) return proxied;
-        return await runWithTenant(tenantId, () => tool.handler(args, { version: this.version, getToolCtx: () => this.getToolCtx() }));
+        if (this.readOnly && tool.readOnly === false) {
+          // remoteWriteSafe passed the gate above but the owner-core proxy did
+          // not handle the call — fail closed rather than write locally.
+          return errorResponse(`Error: Tool "${toolName}" requires the HTTP owner core on a read-only seat, and the proxy did not handle the call.`);
+        }
+        return await runWithTenant(tenantId, () => tool.handler(args, {
+          version: this.version,
+          getToolCtx: () => this.getToolCtx(),
+          getAvailableToolSummaries: () => this.availableToolSummaries(),
+        }));
       } catch (error) {
         return errorResponse(`Error: ${error instanceof Error ? error.message : String(error)}`);
       }

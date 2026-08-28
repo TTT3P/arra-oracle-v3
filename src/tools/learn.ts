@@ -13,6 +13,8 @@ import { tenantIdForWrite } from '../middleware/tenant.ts';
 import { getVectorStoreByModel, getEmbeddingModels } from '../vector/factory.ts';
 import { REPO_ROOT } from '../config.ts';
 import { buildLearningMarkdown, dateSlug, learningSlug, uniqueTail } from '../learn/markdown.ts';
+import { replaceEntityLinks } from '../search/entity-ranking.ts';
+import { replaceDocumentPointers } from '../search/pointer-index.ts';
 import { findDuplicateLearning } from '../learn/dedup.ts';
 import {
   coerceConcepts,
@@ -107,7 +109,17 @@ export async function handleLearn(ctx: ToolContext, input: OracleLearnInput): Pr
 
   const projectDir = (project || '_universal').toLowerCase();
 
-  const dir = vaultRoot
+  // Seat→memory-owner seam (birth spec v5 D1 / L1 gate): when the launcher
+  // binds this seat to one memory owner, learnings land under that root's ψ —
+  // never the data-dir fallback that REPO_ROOT can resolve to. The seam is
+  // policy-projected, so it outranks a locally configured vault too.
+  const memoryOwnerRoot = process.env.ORACLE_MEMORY_OWNER_ROOT?.trim() || null;
+  if (memoryOwnerRoot && vaultRoot) {
+    console.error('[Learn] ORACLE_MEMORY_OWNER_ROOT set — vault route overridden by the memory-owner seam');
+  }
+  const dir = memoryOwnerRoot
+    ? path.join(memoryOwnerRoot, 'ψ', 'memory', 'learnings')
+    : vaultRoot
     ? path.join(vaultRoot, projectDir, 'ψ', 'memory', 'learnings')
     // Write to canonical REPO_ROOT, not ctx.repoRoot (the MCP server's cwd):
     // the dashboard's /api/file resolves source_file against REPO_ROOT, so
@@ -122,7 +134,9 @@ export async function handleLearn(ctx: ToolContext, input: OracleLearnInput): Pr
   const tail = uniqueTail(dir, dateStr, slug);
   const filename = `${dateStr}_${tail}.md`;
   const filePath = path.join(dir, filename);
-  const sourceFileRel = vaultRoot
+  const sourceFileRel = memoryOwnerRoot
+    ? `ψ/memory/learnings/${filename}`
+    : vaultRoot
     ? `${projectDir}/ψ/memory/learnings/${filename}`
     : `ψ/memory/learnings/${filename}`;
 
@@ -161,6 +175,16 @@ export async function handleLearn(ctx: ToolContext, input: OracleLearnInput): Pr
     INSERT INTO oracle_fts (id, content, concepts)
     VALUES (?, ?, ?)
   `).run(id, frontmatter, conceptsList.join(' '));
+
+  // Ranking sidecars, same as the HTTP write path (routes/learn/crud.ts):
+  // without these a fresh MCP learning competes on FTS+vector only and loses
+  // the pointer/entity boosts to older reindexed docs (2026-08-19 gap).
+  replaceEntityLinks(ctx.sqlite, {
+    documentId: id, tenantId, content: frontmatter, concepts: conceptsList, now: now.getTime(),
+  });
+  replaceDocumentPointers(ctx.sqlite, {
+    documentId: id, tenantId, content: frontmatter, concepts: conceptsList, timestamp: now.getTime(),
+  });
 
   // Keep Studio Activity aligned with the MCP write path. This mirrors the
   // legacy handleLearn/logLearning fields while using the injected DB context.

@@ -45,8 +45,28 @@ export function createVectorProxyServer(options: VectorProxyServerOptions = {}) 
   }
 
   return new Elysia({ name: 'vector-proxy-server' })
-    .get(VECTOR_PROXY_ROUTES.health, () => healthPayload(store, state, collectionName, options.version))
+    .get(VECTOR_PROXY_ROUTES.health, async ({ set }) => {
+      // Nothing in normal operation calls the low-level /vectors/* routes
+      // (search traffic goes through /api/search instead, a separate store),
+      // so `ready` used to stay permanently false. Opportunistically ready
+      // THIS store here too — a health probe is the one request every
+      // deployment actually makes routinely (ORA-SHARED-20260821-10).
+      try {
+        await readyStore();
+      } catch (error) {
+        state.error = message(error);
+      }
+      const payload = healthPayload(store, state, collectionName, options.version);
+      // install-*-launchagent.sh's wait loop is `curl -fsS ... >/dev/null` —
+      // it only inspects the HTTP status, never the JSON body. A degraded
+      // store must fail that check (non-2xx) or the installer reports
+      // "running" for a store that cannot actually serve requests
+      // (Riddler P1, ORA-SHARED-20260821-10 round 2).
+      if (payload.status === 'degraded') set.status = 503;
+      return payload;
+    })
     .post(VECTOR_PROXY_ROUTES.add, async ({ body, set }) => {
+      if (isReadonly()) return readonlyRejection(set);
       const documents = validDocuments((body as VectorProxyAddRequest | undefined)?.documents);
       if (!documents) return badRequest(set, 'documents must be an array');
       await withStore((connected) => connected.addDocuments(documents));
@@ -69,7 +89,8 @@ export function createVectorProxyServer(options: VectorProxyServerOptions = {}) 
       }
       return connected.getAllEmbeddings(exportLimit((query as { limit?: unknown }).limit)) as Promise<VectorProxyExportResponse>;
     }))
-    .delete(VECTOR_PROXY_ROUTES.collection, async () => {
+    .delete(VECTOR_PROXY_ROUTES.collection, async ({ set }) => {
+      if (isReadonly()) return readonlyRejection(set);
       await withStore((connected) => connected.deleteCollection());
       state.ready = false;
       return { ok: true };
@@ -115,6 +136,19 @@ function validDocuments(value: unknown): VectorDocument[] | null {
 function badRequest(set: { status?: number | string }, messageText: string) {
   set.status = 400;
   return { error: messageText };
+}
+
+// ORACLE_VECTOR_READONLY=1 (see src/vector-server.ts) previously only relabeled
+// the sidecar's log line — the write routes stayed reachable regardless. A
+// query-only deployment (the sync-and-query split described in the runtime
+// contract) needs this actually enforced at the route layer.
+function isReadonly(): boolean {
+  return process.env.ORACLE_VECTOR_READONLY === '1';
+}
+
+function readonlyRejection(set: { status?: number | string }) {
+  set.status = 403;
+  return { error: 'vector proxy is read-only (ORACLE_VECTOR_READONLY=1) — writes are rejected' };
 }
 
 function normalizeLimit(value: unknown): number {

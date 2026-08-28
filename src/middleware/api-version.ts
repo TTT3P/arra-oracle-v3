@@ -5,7 +5,7 @@ export const API_VERSION = 'v1';
 export const API_VERSION_HEADER = 'X-API-Version';
 const API_PREFIX = '/api';
 const VERSIONED_PREFIX = `${API_PREFIX}/${API_VERSION}`;
-const INFRASTRUCTURE_PATHS = ['/api/health'];
+const INFRASTRUCTURE_PATHS = ['/api/health', '/api/health/live'];
 const LEGACY_HOSTED_ORIGINS = new Set([
   'https://studio.buildwithoracle.com',
   'https://feed.buildwithoracle.com',
