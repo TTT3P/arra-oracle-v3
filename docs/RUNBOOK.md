@@ -98,6 +98,33 @@ sqlite3 -readonly <backup.db> "SELECT count(*) FROM oracle_documents;"
 sqlite3 -readonly ~/.arra-oracle-v2/oracle.db "SELECT count(*) FROM oracle_documents;"
 ```
 
+**Type B-auto — nightly automated `.db` backup** (ORA-BACKUP-AUTO-01, 2026-08-28). LaunchAgent
+`com.tt3p.arra-backup` runs `scripts/backup-oracle.sh` nightly (03:30 local; deployed copy at
+`~/.arra-oracle-v2/bin/backup-oracle.sh`, plist points there so it is checkout-independent):
+1. `sqlite3 oracle.db ".backup <dir>/oracle.db.<UTC-stamp>"` → `~/.arra-oracle-v2/backups/`.
+2. `PRAGMA integrity_check` on the **copy** — must be `ok`, else the run exits non-zero and logs `ERROR:`.
+3. Retention: newest **7 daily** + newest-per-ISO-week for **4 weeks**; older pruned (only `backups/oracle.db.*`).
+4. Off-Mac sync of the newest copy to the Windows/WSL GPU node over Tailscale —
+   `win:/home/tt3p/arra-oracle-backups/` (rsync; remote runs `wsl -u tt3p -- rsync`); remote size verified == local.
+- Log: `~/.arra-oracle-v2/oracle-backup.log` (+ `oracle-backup.error.log` = job stderr). A failed run is a
+  non-zero exit **and** an `ERROR:` line: `grep ERROR: ~/.arra-oracle-v2/oracle-backup.log`.
+- Install / re-deploy (idempotent): `bash scripts/install-backup-launchagent.sh`. First run:
+  `launchctl kickstart gui/$(id -u)/com.tt3p.arra-backup`. **Rollback**:
+  `launchctl bootout gui/$(id -u)/com.tt3p.arra-backup` (removes the job; backups + deployed script remain).
+- List off-Mac copies: `ssh win "wsl -u tt3p -- ls -la /home/tt3p/arra-oracle-backups"`.
+
+**Restore rehearsal** (proves the `.db` copy restores; NON-live — never touches `~/.arra-oracle-v2/oracle.db`,
+no daemon stop needed):
+```sh
+newest=$(ls -1 ~/.arra-oracle-v2/backups/oracle.db.* | sort | tail -1)
+cp "$newest" /tmp/oracle-restore-rehearsal.db
+sqlite3 /tmp/oracle-restore-rehearsal.db 'PRAGMA integrity_check;'                      # expect: ok
+sqlite3 -readonly /tmp/oracle-restore-rehearsal.db 'SELECT count(*) FROM oracle_documents;'
+sqlite3 -readonly ~/.arra-oracle-v2/oracle.db      'SELECT count(*) FROM oracle_documents;'  # counts must match
+rm -f /tmp/oracle-restore-rehearsal.db
+```
+Latest rehearsal result is recorded in the ORA-BACKUP-AUTO-01 receipt (agentic-os evidence dir).
+
 ## 6. Fresh install
 
 ```sh
