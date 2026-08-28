@@ -14,7 +14,8 @@ several still trace to 2026-08-16/17, and Type A bundle-restore (section 5) is s
   `com.tt3p.arra-oracle` (installed 2026-08-18 via `bun run server:install-launchagent`;
   RunAtLoad + KeepAlive, logs `~/.arra-oracle-v2/oracle-server.log`). The plist
   sets PATH with `/opt/homebrew/bin` so the git-origin project fallback works
-  (launchd's default PATH lacks it). `bun run server:ensure` remains a no-op
+  (launchd's default PATH lacks it) and `ORACLE_ENTITY_BACKFILL=1` (installer owns
+  it; the 08-19 hand-edit was lost on the 08-22 reinstall). `bun run server:ensure` remains a no-op
   starter when the agent is already serving; find the listener with
   `lsof -iTCP:47778 -sTCP:LISTEN`
 - Data dir: `~/.arra-oracle-v2/` — `oracle.db` (SQLite, WAL), `lancedb/` (vectors),

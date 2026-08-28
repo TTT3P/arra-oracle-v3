@@ -14,6 +14,8 @@ LAUNCH_AGENT_DIR="${ARRA_ORACLE_LAUNCHAGENT_DIR:-$HOME/Library/LaunchAgents}"
 PLIST_PATH="$LAUNCH_AGENT_DIR/$LABEL.plist"
 INSTALL_ONLY="${ARRA_ORACLE_INSTALL_ONLY:-0}"
 PORT="${ARRA_ORACLE_PORT:-47778}"
+# Entity/pointer sidecar backfill worker (default on; set 0 to disable).
+ENTITY_BACKFILL="${ORACLE_ENTITY_BACKFILL:-1}"
 
 if [[ -z "$BUN_BIN" || ! -x "$BUN_BIN" ]]; then
   echo "error: Bun executable not found; set ARRA_ORACLE_BUN_BIN" >&2
@@ -72,6 +74,8 @@ cat > "$tmp_plist" <<PLIST
     <string>$(xml_escape "$DATA_DIR/oracle.db")</string>
     <key>ORACLE_PORT</key>
     <string>$(xml_escape "$PORT")</string>
+    <key>ORACLE_ENTITY_BACKFILL</key>
+    <string>$(xml_escape "$ENTITY_BACKFILL")</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
