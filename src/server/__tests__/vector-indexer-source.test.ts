@@ -45,9 +45,9 @@ function writeSqliteDb() {
 }
 
 describe('loadVectorIndexDocuments', () => {
-  test('loads vector documents from vault markdown with stable oracle_learn identity', async () => {
+  test('loads vector documents from vault markdown with stable oracle_learn identity', () => {
     writeLearningFile();
-    const loaded = await loadVectorIndexDocuments({ source: 'vault', repoRoot: vaultRoot, dbPath: sqlitePath });
+    const loaded = loadVectorIndexDocuments({ source: 'vault', repoRoot: vaultRoot, dbPath: sqlitePath });
 
     expect(loaded.source).toBe('vault');
     expect(loaded.repoRoot).toBe(vaultRoot);
@@ -58,7 +58,7 @@ describe('loadVectorIndexDocuments', () => {
     expect(loaded.docs[0].metadata.project).toBe('github.com/Soul-Brews-Studio/arra-oracle-v3');
   });
 
-  test('loads long vault markdown as locatable paragraph chunks', async () => {
+  test('loads long vault markdown as locatable paragraph chunks', () => {
     const dir = path.join(vaultRoot, 'ψ', 'memory', 'learnings');
     const para = (label: string, char: string) => `${label} ${char.repeat(330)}`;
     fs.mkdirSync(dir, { recursive: true });
@@ -70,7 +70,7 @@ describe('loadVectorIndexDocuments', () => {
       para('gamma', 'c'),
     ].join('\n'));
 
-    const loaded = await loadVectorIndexDocuments({ source: 'vault', repoRoot: vaultRoot, dbPath: sqlitePath });
+    const loaded = loadVectorIndexDocuments({ source: 'vault', repoRoot: vaultRoot, dbPath: sqlitePath });
     const chunks = loaded.docs.filter((doc) => doc.id.includes('long-vector-source__chunk_'));
 
     expect(chunks.map((doc) => doc.metadata.chunk_index)).toEqual([0, 1]);
@@ -80,10 +80,10 @@ describe('loadVectorIndexDocuments', () => {
     expect(chunks[1].document).toContain('gamma');
   });
 
-  test('auto mode falls back to SQLite when no vault markdown exists', async () => {
+  test('auto mode falls back to SQLite when no vault markdown exists', () => {
     fs.mkdirSync(emptyRoot, { recursive: true });
     writeSqliteDb();
-    const loaded = await loadVectorIndexDocuments({ source: 'auto', repoRoot: emptyRoot, dbPath: sqlitePath });
+    const loaded = loadVectorIndexDocuments({ source: 'auto', repoRoot: emptyRoot, dbPath: sqlitePath });
 
     expect(loaded.source).toBe('sqlite');
     expect(loaded.docs).toHaveLength(1);
@@ -94,10 +94,10 @@ describe('loadVectorIndexDocuments', () => {
     });
   });
 
-  test('explicit vault mode refuses an empty vault instead of wiping vectors', async () => {
+  test('explicit vault mode refuses an empty vault instead of wiping vectors', () => {
     fs.mkdirSync(emptyRoot, { recursive: true });
-    await expect(loadVectorIndexDocuments({ source: 'vault', repoRoot: emptyRoot, dbPath: sqlitePath }))
-      .rejects.toThrow(/found 0 vault documents/);
+    expect(() => loadVectorIndexDocuments({ source: 'vault', repoRoot: emptyRoot, dbPath: sqlitePath }))
+      .toThrow(/found 0 vault documents/);
   });
 });
 

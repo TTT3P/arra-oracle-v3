@@ -54,10 +54,10 @@ The indexer queued zero vector jobs because a drizzle raw-sql row is a positiona
 `;
 
 describe('inbox markdown becomes indexed documents', () => {
-  test('a report in ψ/inbox/ is collected', async () => {
+  test('a report in ψ/inbox/ is collected', () => {
     const f = fixture({ 'ψ/inbox/2026-07-26_report.md': REPORT });
     try {
-      const docs = await f.collect();
+      const docs = f.collect();
       expect(docs.length).toBeGreaterThan(0);
       expect(docs[0]?.source_file).toBe('ψ/inbox/2026-07-26_report.md');
     } finally {
@@ -65,36 +65,36 @@ describe('inbox markdown becomes indexed documents', () => {
     }
   });
 
-  test('nested inbox subdirectories are walked, not just the top level', async () => {
+  test('nested inbox subdirectories are walked, not just the top level', () => {
     // ψ/inbox/handoff/ is where every /forward writes. It was unindexed too.
     const f = fixture({ 'ψ/inbox/handoff/2026-07-26_05-55_overnight.md': REPORT });
     try {
-      expect((await f.collect()).length).toBeGreaterThan(0);
+      expect(f.collect().length).toBeGreaterThan(0);
     } finally {
       f.cleanup();
     }
   });
 
-  test('an empty file produces nothing rather than an empty document', async () => {
+  test('an empty file produces nothing rather than an empty document', () => {
     const f = fixture({ 'ψ/inbox/blank.md': '   \n' });
     try {
-      expect(await f.collect()).toEqual([]);
+      expect(f.collect()).toEqual([]);
     } finally {
       f.cleanup();
     }
   });
 
-  test('identical content in two places is stored once', async () => {
+  test('identical content in two places is stored once', () => {
     // The same report is delivered to several oracles and copied between trees.
     const f = fixture({ 'ψ/inbox/a.md': REPORT, 'ψ/inbox/handoff/a.md': REPORT });
     try {
-      expect(await f.collect()).toHaveLength(1);
+      expect(f.collect()).toHaveLength(1);
     } finally {
       f.cleanup();
     }
   });
 
-  test('same basename in different directories does not collide on id', async () => {
+  test('same basename in different directories does not collide on id', () => {
     /**
      * Inbox filenames repeat heavily across senders and dates. If the id came from the
      * basename, the second document would overwrite the first and the corpus would silently
@@ -105,7 +105,7 @@ describe('inbox markdown becomes indexed documents', () => {
       'ψ/inbox/handoff/report.md': `${REPORT}\nsecond copy, different content\n`,
     });
     try {
-      const ids = (await f.collect()).map((d) => d.id);
+      const ids = f.collect().map((d) => d.id);
       expect(ids).toHaveLength(2);
       expect(new Set(ids).size).toBe(2);
     } finally {
