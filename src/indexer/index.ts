@@ -103,14 +103,16 @@ export class OracleIndexer {
 
     // Collect documents from all source types
     const shared = { config: this.config, seenContentHashes: this.seenContentHashes };
+    // Collectors yield to the event loop between file batches (src/indexer/yield.ts)
+    // so health probes and searches are served while a reindex is running.
     const documents: OracleDocument[] = [
-      ...collectDocuments({ ...shared, subdir: 'resonance', parseFn: parseResonanceFile, label: 'resonance' }),
-      ...collectDocuments({ ...shared, subdir: 'learnings', parseFn: parseLearningFile, label: 'learning' }),
-      ...collectDocuments({ ...shared, subdir: 'retrospectives', parseFn: parseRetroFile, label: 'retrospective' }),
-      ...collectDocuments({ ...shared, subdir: 'distillations', parseFn: parseDistillationFile, label: 'distillation' }),
-      ...collectPsiLearn(shared),
-      ...collectPsiInbox(shared),
-      ...collectSecurityCorpus(shared),
+      ...await collectDocuments({ ...shared, subdir: 'resonance', parseFn: parseResonanceFile, label: 'resonance' }),
+      ...await collectDocuments({ ...shared, subdir: 'learnings', parseFn: parseLearningFile, label: 'learning' }),
+      ...await collectDocuments({ ...shared, subdir: 'retrospectives', parseFn: parseRetroFile, label: 'retrospective' }),
+      ...await collectDocuments({ ...shared, subdir: 'distillations', parseFn: parseDistillationFile, label: 'distillation' }),
+      ...await collectPsiLearn(shared),
+      ...await collectPsiInbox(shared),
+      ...await collectSecurityCorpus(shared),
     ];
 
     // Safety: if we found zero source documents but the DB has existing

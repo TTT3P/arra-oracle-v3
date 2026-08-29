@@ -116,7 +116,7 @@ export const rebuildVectorCollection = localVectorOperations.rebuildCollection.b
 
 async function runIndexJob(jobId: string, input: StartBody, modelKeys: string[], batchSize: number) {
   try {
-    const loaded = loadVectorIndexDocuments({ source: input.source, repoRoot: input.repoRoot });
+    const loaded = await loadVectorIndexDocuments({ source: input.source, repoRoot: input.repoRoot });
     currentJob.source = loaded.source;
     currentJob.repoRoot = loaded.repoRoot;
     currentJob.total = loaded.docs.length * modelKeys.length;

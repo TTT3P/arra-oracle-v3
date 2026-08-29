@@ -126,4 +126,68 @@ describe('POST /indexer/reindex', () => {
     release();
     await new Promise(resolve => setTimeout(resolve, 0));
   });
+
+  it('logs origin headers on start, complete and 409 refusal (incident 2026-08-29)', async () => {
+    let release!: () => void;
+    const blocker = new Promise<void>(resolve => { release = resolve; });
+    const runFull = mock(async ({ repoRoot }: { repoRoot?: string | null; append?: boolean }) => {
+      await blocker;
+      return { ok: true as const, repoRoot: repoRoot ?? '/repo' };
+    });
+    const runRetros = mock(async (repoRoot: string) => ({ ok: true as const, repoRoot, documents: 0 }));
+    const runRetroFile = mock(async (repoRoot: string, filePath: string) => ({ ok: true as const, repoRoot, filePath, documents: 0 }));
+    const lines: string[] = [];
+    const app = new Elysia().use(createReindexRoute({
+      resolveRepoRoot: () => '/repo',
+      runFull,
+      runRetros,
+      runRetroFile,
+      log: (line) => lines.push(line),
+    }));
+    const headers = {
+      'content-type': 'application/json',
+      'user-agent': 'curl/8.7.1',
+      'x-forwarded-for': '10.0.0.7',
+      'x-oracle-seat': 'barbara',
+      'x-correlation-id': 'abcdef1234567890',
+    };
+
+    const first = await app.handle(new Request('http://localhost/indexer/reindex', {
+      method: 'POST', headers, body: JSON.stringify({ wait: false }),
+    }));
+    expect(first.status).toBe(200);
+    const second = await app.handle(new Request('http://localhost/indexer/reindex', {
+      method: 'POST', headers, body: JSON.stringify({ scope: 'retros' }),
+    }));
+    expect(second.status).toBe(409);
+    release();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toMatch(/^\[reindex\] ts=\d{4}-\d{2}-\d{2}T[^ ]+ event=start jobId="reindex-\d+"/);
+    expect(lines[0]).toContain('ua="curl/8.7.1"');
+    expect(lines[0]).toContain('xff="10.0.0.7"');
+    expect(lines[0]).toContain('seat="barbara"');
+    expect(lines[0]).toContain('cid="abcdef12"');
+    expect(lines[0]).toContain('scope="all" wait=false append=false');
+    expect(lines[1]).toContain('event=refused');
+    expect(lines[1]).toContain('scope="retros"');
+    expect(lines[1]).toMatch(/activeJob="reindex-\d+"/);
+    expect(lines[2]).toMatch(/event=complete jobId="reindex-\d+" cid="abcdef12" durationMs=\d+/);
+  });
+
+  it('logs missing origin headers as "-" instead of crashing', async () => {
+    const runFull = mock(async ({ repoRoot }: { repoRoot?: string | null; append?: boolean }) => ({ ok: true as const, repoRoot: repoRoot ?? '/repo' }));
+    const runRetros = mock(async (repoRoot: string) => ({ ok: true as const, repoRoot, documents: 0 }));
+    const runRetroFile = mock(async (repoRoot: string, filePath: string) => ({ ok: true as const, repoRoot, filePath, documents: 0 }));
+    const lines: string[] = [];
+    const app = new Elysia().use(createReindexRoute({
+      resolveRepoRoot: () => '/repo', runFull, runRetros, runRetroFile, log: (line) => lines.push(line),
+    }));
+
+    const res = await post(app, {});
+    expect(res.status).toBe(200);
+    expect(lines[0]).toContain('ua="-" xff="-" seat="-" cid="-"');
+    expect(lines[1]).toContain('event=complete');
+  });
 });

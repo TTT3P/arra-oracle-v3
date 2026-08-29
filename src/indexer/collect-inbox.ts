@@ -15,12 +15,13 @@ import path from 'path';
 import type { IndexerConfig, OracleDocument } from '../types.ts';
 import { discoverProjectPsiDirs } from './discovery.ts';
 import { getAllMarkdownFiles } from './collectors.ts';
+import { forEachYielding } from './yield.ts';
 import { isPsiInboxSource, parsePsiInboxFile } from './inbox-doc-source.ts';
 
-export function collectPsiInbox(opts: {
+export async function collectPsiInbox(opts: {
   config: IndexerConfig;
   seenContentHashes: Set<string>;
-}): OracleDocument[] {
+}): Promise<OracleDocument[]> {
   const { config, seenContentHashes } = opts;
   const documents: OracleDocument[] = [];
   const subPath = config.sourcePaths.inbox ?? 'ψ/inbox';
@@ -34,17 +35,17 @@ export function collectPsiInbox(opts: {
   for (const sourcePath of roots) {
     const files = getAllMarkdownFiles(sourcePath);
     totalFiles += files.length;
-    for (const filePath of files) {
+    await forEachYielding(files, (filePath) => {
       const relPath = path.relative(config.repoRoot, filePath).split(path.sep).join('/');
-      if (!isPsiInboxSource(relPath)) continue;
+      if (!isPsiInboxSource(relPath)) return;
 
       const content = fs.readFileSync(filePath, 'utf-8');
-      if (!content.trim()) continue;
+      if (!content.trim()) return;
       const contentHash = Bun.hash(content).toString(36);
-      if (seenContentHashes.has(contentHash)) { skippedDupes++; continue; }
+      if (seenContentHashes.has(contentHash)) { skippedDupes++; return; }
       seenContentHashes.add(contentHash);
       documents.push(...parsePsiInboxFile(relPath, content));
-    }
+    });
   }
 
   console.log(`Indexed ${documents.length} ψ/inbox documents from ${totalFiles} files (skipped ${skippedDupes} duplicates)`);
