@@ -149,7 +149,7 @@ function vectorEngineDetails(preset: EmbeddingModelConfig) {
 }
 
 export async function readVectorBackendHealth(): Promise<VectorBackendHealth> {
-  const timeout = parseInt(process.env.ORACLE_VECTOR_HEALTH_TIMEOUT || '2000', 10);
+  const timeout = parseInt(process.env.ORACLE_VECTOR_HEALTH_TIMEOUT || '8000', 10);
   const models = getEmbeddingModels();
 
   const vectorEnabled = isVectorSectionEnabled();

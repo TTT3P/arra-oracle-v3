@@ -36,6 +36,7 @@ export type EmbedderRuntimeStatus = {
 };
 
 type ProbePreset = { provider?: string; model?: string; endpoint?: string; embedder?: EmbedderConfig };
+export const DEFAULT_PROBE_TIMEOUT_MS = 8_000;
 type ProbeOptions = { timeoutMs?: number; text?: string };
 type RuntimeProbeOptions = ProbeOptions & { force?: boolean; preset?: ProbePreset; ttlMs?: number; probe?: () => Promise<EmbedderRuntimeStatus> };
 
@@ -158,7 +159,9 @@ export async function probeEmbeddingProvider(
   selection: EmbeddingProviderSelection,
   options: ProbeOptions = {},
 ): Promise<EmbedderRuntimeStatus> {
-  const timeoutMs = positiveInt(process.env.ORACLE_EMBEDDER_PROBE_TIMEOUT_MS, options.timeoutMs ?? 2_000);
+  // 8 s (was 2 s): a cold Ollama model load takes several seconds and a 2 s probe
+  // turned every cold start into a false 'degraded / FTS-only' verdict (2026-08-29).
+  const timeoutMs = positiveInt(process.env.ORACLE_EMBEDDER_PROBE_TIMEOUT_MS, options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS);
   try {
     const pending = provider.embed([options.text ?? 'oracle embedder boot probe'], 'query');
     pending.catch(() => undefined);

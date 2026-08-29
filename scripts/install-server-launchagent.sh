@@ -16,6 +16,9 @@ INSTALL_ONLY="${ARRA_ORACLE_INSTALL_ONLY:-0}"
 PORT="${ARRA_ORACLE_PORT:-47778}"
 # Entity/pointer sidecar backfill worker (default on; set 0 to disable).
 ENTITY_BACKFILL="${ORACLE_ENTITY_BACKFILL:-1}"
+# Embedder boot-probe budget (ms) and Ollama keep-alive for embed calls (2026-08-29).
+EMBEDDER_PROBE_TIMEOUT_MS="${ORACLE_EMBEDDER_PROBE_TIMEOUT_MS:-8000}"
+EMBED_KEEP_ALIVE="${ORACLE_EMBED_KEEP_ALIVE:--1}"
 
 if [[ -z "$BUN_BIN" || ! -x "$BUN_BIN" ]]; then
   echo "error: Bun executable not found; set ARRA_ORACLE_BUN_BIN" >&2
@@ -76,6 +79,10 @@ cat > "$tmp_plist" <<PLIST
     <string>$(xml_escape "$PORT")</string>
     <key>ORACLE_ENTITY_BACKFILL</key>
     <string>$(xml_escape "$ENTITY_BACKFILL")</string>
+    <key>ORACLE_EMBEDDER_PROBE_TIMEOUT_MS</key>
+    <string>$(xml_escape "$EMBEDDER_PROBE_TIMEOUT_MS")</string>
+    <key>ORACLE_EMBED_KEEP_ALIVE</key>
+    <string>$(xml_escape "$EMBED_KEEP_ALIVE")</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
