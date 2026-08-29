@@ -22,6 +22,15 @@ export class OllamaEmbeddings implements EmbeddingProvider {
   private retryDelayMs: number;
   private batchSize: number;
   private timeoutMs: number;
+  /**
+   * Ollama unloads a model after its keep-alive (default 5 min) — the next embed
+   * cold-loads bge-m3 for several seconds, the boot probe times out and search
+   * degrades to FTS-only until it warms (2026-08-29 CROO diagnosis). Pin it.
+   * ORACLE_EMBED_KEEP_ALIVE accepts Ollama's forms: an integer (seconds; -1 = forever,
+   * sent as a NUMBER — Ollama rejects "-1" as a string: 'missing unit in duration')
+   * or a Go duration string ('30m', '24h').
+   */
+  private keepAlive: number | string;
   constructor(config: { baseUrl?: string; model?: string } = {}) {
     this.baseUrl = resolveOllamaBaseUrl(config.baseUrl, process.env.OLLAMA_BASE_URL, process.env.OLLAMA_HOST);
     this.model = config.model || 'nomic-embed-text';
@@ -29,6 +38,7 @@ export class OllamaEmbeddings implements EmbeddingProvider {
     this.retryDelayMs = positiveInt(process.env.ORACLE_EMBED_RETRY_DELAY_MS, 150);
     this.batchSize = positiveInt(process.env.ORACLE_EMBED_BATCH_SIZE, 50);
     this.timeoutMs = positiveInt(process.env.ORACLE_EMBED_TIMEOUT_MS, 30_000);
+    this.keepAlive = parseKeepAlive(process.env.ORACLE_EMBED_KEEP_ALIVE);
     const KNOWN_DIMS: Record<string, number> = {
       'nomic-embed-text': 768,
       'qwen3-embedding': 1024,
@@ -87,7 +97,7 @@ export class OllamaEmbeddings implements EmbeddingProvider {
         const response = await fetch(`${this.baseUrl}/api/embed`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: this.model, input }),
+          body: JSON.stringify({ model: this.model, input, keep_alive: this.keepAlive }),
           signal: controller.signal,
         });
         if (!response.ok) {
@@ -110,6 +120,11 @@ export class OllamaEmbeddings implements EmbeddingProvider {
     const message = lastError instanceof Error ? lastError.message : String(lastError);
     throw new Error(`Ollama embedding failed after ${this.attempts} attempts: ${message}`, { cause: lastError });
   }
+}
+export function parseKeepAlive(raw: string | undefined): number | string {
+  const value = raw?.trim();
+  if (!value) return -1;
+  return /^-?\d+$/.test(value) ? Number(value) : value;
 }
 function positiveInt(raw: string | undefined, fallback: number): number {
   if (!raw) return fallback;
