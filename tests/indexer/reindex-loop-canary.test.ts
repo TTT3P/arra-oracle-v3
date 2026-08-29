@@ -53,6 +53,9 @@ resetDefaultDatabaseForTests(process.env.ORACLE_DB_PATH);
 const { createReindexRoute } = await import('../../src/routes/indexer/reindex.ts');
 
 type Run = {
+  ids: string[];            // every oracle_documents id after the run (coverage proof)
+  sourceFiles: number;      // COUNT(DISTINCT source_file)
+  ftsOrphans: number;       // documents with no oracle_fts row
   maxLoopDelayMs: number;   // max timer drift of a 10 ms ticker = event-loop blocked time
   maxProbeMs: number;       // max /health|/search round trip once the loop was free
   probes: number;
@@ -109,7 +112,11 @@ async function runCanary(): Promise<Run> {
     const body = await (await job).json() as { ok?: boolean; status?: string; error?: string };
     expect(body.status).toBe('complete');
     expect(body.ok).toBe(true);
+    const ids = (reader.prepare(`SELECT id FROM oracle_documents WHERE created_by = 'indexer' ORDER BY id`).all() as { id: string }[]).map((r) => r.id);
+    const sourceFiles = (reader.prepare(`SELECT COUNT(DISTINCT source_file) AS n FROM oracle_documents WHERE created_by = 'indexer'`).get() as { n: number }).n;
+    const ftsOrphans = (reader.prepare(`SELECT COUNT(*) AS n FROM oracle_documents d LEFT JOIN oracle_fts f ON f.id = d.id WHERE d.created_by = 'indexer' AND f.id IS NULL`).get() as { n: number }).n;
     return {
+      ids, sourceFiles, ftsOrphans,
       maxLoopDelayMs: Math.round(maxLoopDelayMs), maxProbeMs: Math.round(maxProbeMs), probes,
       totalMs: Math.round(performance.now() - started), phases,
     };
@@ -137,7 +144,15 @@ describe(`reindex loop canary (${FILES} files)`, () => {
     }
     delete process.env.ORACLE_INDEX_YIELD_EVERY;
     const yielding = await runCanary();
-    console.info(`[canary] files=${FILES} baseline(no-yield)=${JSON.stringify(baseline)} yielding=${JSON.stringify(yielding)}`);
+    const summary = ({ ids, ...rest }: Run) => ({ docs: ids.length, ...rest });
+    console.info(`[canary] files=${FILES} baseline(no-yield)=${baseline ? JSON.stringify(summary(baseline)) : 'skipped'} yielding=${JSON.stringify(summary(yielding))}`);
+
+    // Coverage: every source file indexed, every document has its FTS row, no id missing or duplicated.
+    expect(yielding.sourceFiles).toBe(FILES);
+    expect(yielding.ftsOrphans).toBe(0);
+    expect(new Set(yielding.ids).size).toBe(yielding.ids.length);
+    expect(yielding.ids.length).toBeGreaterThanOrEqual(FILES);
+    if (baseline) expect(yielding.ids).toEqual(baseline.ids);  // exact same id set as the single-transaction store
 
     if (baseline) {
       // Baseline must actually exercise the incident: the loop is held for most of the run.

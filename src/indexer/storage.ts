@@ -44,7 +44,7 @@ export async function storeDocuments(
   vectorClient: VectorStoreAdapter | null,
   project: string | null,
   documents: OracleDocument[],
-  opts: { createdBy?: string; tenantId?: string; insertOnly?: boolean } = {}
+  opts: { createdBy?: string; tenantId?: string; insertOnly?: boolean; nextBatch?: typeof nextBatchSize } = {}
 ): Promise<void> {
   const now = Date.now();
   const tenantId = opts.tenantId ?? tenantIdForWrite();
@@ -66,10 +66,15 @@ export async function storeDocuments(
   // once per document. The first batch starts small and grows by measurement.
   const every = yieldEvery();
   const singleTx = opts.insertOnly || every === 0;
+  const adapt = opts.nextBatch ?? nextBatchSize;
   let batchSize = singleTx ? storedDocuments.length : Math.max(1, Math.floor(every / 3));
-  for (let start = 0; start < storedDocuments.length; start += Math.max(batchSize, 1)) {
+  // The cursor advances by the batch just processed — never by the adapted
+  // NEXT size (d56e3b46 did that and silently skipped/rewrote documents).
+  let start = 0;
+  while (start < storedDocuments.length) {
     if (start > 0) await yieldToEventLoop();
     const batch = storedDocuments.slice(start, start + Math.max(batchSize, 1));
+    start += batch.length;
     const batchStarted = performance.now();
     db.transaction((tx) => {
     removeDocumentPointers(sqlite, tenantId, batch.map((doc) => doc.id));
@@ -161,7 +166,7 @@ export async function storeDocuments(
       });
     }
     });
-    if (!singleTx) batchSize = nextBatchSize(batchSize, performance.now() - batchStarted);
+    if (!singleTx) batchSize = Math.max(1, adapt(batchSize, performance.now() - batchStarted));
   }
 
   // Batch insert to vector store in chunks of 100 (skip if no client)
