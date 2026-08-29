@@ -14,8 +14,8 @@ import fs from 'fs';
 import path from 'path';
 import type { IndexerConfig, OracleDocument } from '../types.ts';
 import { discoverProjectPsiDirs } from './discovery.ts';
-import { getAllMarkdownFiles } from './collectors.ts';
-import { forEachYielding } from './yield.ts';
+import { readEnumeratedFile } from './collectors.ts';
+import { forEachYielding, walkMarkdownFiles } from './yield.ts';
 import { isPsiInboxSource, parsePsiInboxFile } from './inbox-doc-source.ts';
 
 export async function collectPsiInbox(opts: {
@@ -33,14 +33,14 @@ export async function collectPsiInbox(opts: {
   let skippedDupes = 0;
   let totalFiles = 0;
   for (const sourcePath of roots) {
-    const files = getAllMarkdownFiles(sourcePath);
+    const files = await walkMarkdownFiles(sourcePath);
     totalFiles += files.length;
     await forEachYielding(files, (filePath) => {
       const relPath = path.relative(config.repoRoot, filePath).split(path.sep).join('/');
       if (!isPsiInboxSource(relPath)) return;
 
-      const content = fs.readFileSync(filePath, 'utf-8');
-      if (!content.trim()) return;
+      const content = readEnumeratedFile(filePath);
+      if (!content?.trim()) return;
       const contentHash = Bun.hash(content).toString(36);
       if (seenContentHashes.has(contentHash)) { skippedDupes++; return; }
       seenContentHashes.add(contentHash);

@@ -45,11 +45,21 @@ export function documentPointers(input: PointerInput): Pointer[] {
   ]);
 }
 
-export function replaceDocumentPointers(dbInput: OracleDbInput, input: PointerInput): void {
+/**
+ * `removeFirst:false` is for bulk writers that already called `removeDocumentPointers`
+ * for the whole batch: the removal reads EVERY pointer row of the tenant, so doing it
+ * per document made a full reindex O(docs × pointers) — the store phase of the
+ * 2026-08-29 reindex starvation incident.
+ */
+export function replaceDocumentPointers(
+  dbInput: OracleDbInput,
+  input: PointerInput,
+  opts: { removeFirst?: boolean } = {},
+): void {
   try {
     const db = toDb(dbInput);
     const tenantId = input.tenantId?.trim() || 'default';
-    removeDocumentPointers(db, tenantId, [input.documentId]);
+    if (opts.removeFirst !== false) removeDocumentPointers(db, tenantId, [input.documentId]);
     const now = Date.now();
     for (const item of documentPointers(input)) {
       const id = pointerId(tenantId, item.kind, item.key);

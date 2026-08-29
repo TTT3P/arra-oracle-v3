@@ -2,6 +2,7 @@ import { Elysia, t } from 'elysia';
 import { runOracleReindex, resolveIndexerRepoRoot } from '../../indexer/runner.ts';
 import { indexRetrospectives, indexRetroFile } from '../../indexer/retro-index.ts';
 import { currentTenantId, runWithTenant } from '../../middleware/tenant.ts';
+import { describeError, describeRepoRoot, reindexLogLine, reindexOrigin } from './reindex-log.ts';
 
 type ReindexResult =
   | Awaited<ReturnType<typeof runOracleReindex>>
@@ -24,29 +25,8 @@ const defaultDeps: ReindexDeps = {
   runRetroFile: indexRetroFile,
 };
 
-/**
- * Who called reindex. Incident 2026-08-29: 114 reindex POSTs in 21 h starved the
- * event loop, and the nginx-style request log carries neither timestamp nor
- * caller, so the source could not be named. One `[reindex]` line per lifecycle
- * event (start / refused / complete / error) with wall-clock time and the
- * caller-identifying headers answers "who" on the next occurrence.
- */
-export function reindexOrigin(request: Request): Record<string, string> {
-  const h = request.headers;
-  return {
-    ua: h.get('user-agent') ?? '-',
-    xff: h.get('x-forwarded-for') ?? '-',
-    seat: h.get('x-oracle-seat') ?? h.get('x-maw-agent') ?? '-',
-    cid: (h.get('x-correlation-id') ?? h.get('x-request-id') ?? '-').slice(0, 8),
-  };
-}
-
-function reindexLogLine(event: string, fields: Record<string, unknown>): string {
-  const parts = Object.entries(fields).map(([k, v]) => `${k}=${JSON.stringify(v ?? '-')}`);
-  return `[reindex] ts=${new Date().toISOString()} event=${event} ${parts.join(' ')}`;
-}
-
-export function createReindexRoute(deps: ReindexDeps = defaultDeps) {
+export function createReindexRoute(overrides: Partial<ReindexDeps> = {}) {
+  const deps: ReindexDeps = { ...defaultDeps, ...overrides };
   const activeJobs = new Map<string, { id: string; startedAt: string }>();
 
   const log = deps.log ?? ((line: string) => console.log(line));
@@ -69,7 +49,7 @@ export function createReindexRoute(deps: ReindexDeps = defaultDeps) {
       return { ok: false, error: 'Reindex already running', activeJob };
     }
     const startedMs = performance.now();
-    log(reindexLogLine('start', { jobId, ...origin, repoRoot }));
+    log(reindexLogLine('start', { jobId, ...origin, repo: describeRepoRoot(repoRoot) }));
 
     const run = async () => {
       if (scope === 'retros') return deps.runRetros(repoRoot);
@@ -89,7 +69,7 @@ export function createReindexRoute(deps: ReindexDeps = defaultDeps) {
       })
       .catch((err) => {
         const message = err instanceof Error ? err.message : String(err);
-        log(reindexLogLine('error', { jobId, cid: origin.cid, durationMs: durationMs(), error: message }));
+        log(reindexLogLine('error', { jobId, cid: origin.cid, durationMs: durationMs(), error: describeError(err) }));
         return { ok: false as const, jobId, status: 'error' as const, repoRoot, error: message };
       })
       .finally(() => {

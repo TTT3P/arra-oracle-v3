@@ -28,6 +28,7 @@ import { parseResonanceFile, parseLearningFile, parseRetroFile, parseDistillatio
 import { getEmbeddingModels } from '../vector/factory.ts';
 import { collectDocuments, collectPsiLearn, collectSecurityCorpus } from './collectors.ts';
 import { collectPsiInbox } from './collect-inbox.ts';
+import { groupBySourceFile, yieldEvery, yieldToEventLoop } from './yield.ts';
 import {
   activeIndexerWhere,
   changedDocumentIds,
@@ -200,8 +201,17 @@ export class OracleIndexer {
     // Store in SQLite + FTS5 first. Vector work is queued afterwards so
     // embedding failures cannot roll back the source-of-truth text index.
     await storeDocuments(this.sqlite, this.db, null, this.project, indexDocuments, { tenantId });
-    const superseded = supersedeReplacedSourceDocs(this.db, indexDocuments, tenantId);
-    const vectorJobs = safeEnqueueVectorJobs(this.db, indexDocuments, changedIds);
+    // Supersede + vector-job enqueue are per-source-file / per-doc SQL loops:
+    // run them in source-file groups with a yield between groups (a source
+    // file's chunks must stay in one group — supersede compares against them).
+    let superseded = 0;
+    const vectorJobs = { queued: 0, skipped: 0, failed: 0 };
+    for (const group of groupBySourceFile(indexDocuments, yieldEvery())) {
+      await yieldToEventLoop();
+      superseded += supersedeReplacedSourceDocs(this.db, group, tenantId);
+      const jobs = safeEnqueueVectorJobs(this.db, group, changedIds);
+      vectorJobs.queued += jobs.queued; vectorJobs.skipped += jobs.skipped; vectorJobs.failed += jobs.failed;
+    }
 
     setIndexingStatus(this.db, this.config, false, indexDocuments.length, indexDocuments.length);
     console.log(`Indexed ${indexDocuments.length} chunks (SQLite + FTS5)`);

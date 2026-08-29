@@ -165,10 +165,12 @@ describe('POST /indexer/reindex', () => {
 
     expect(lines).toHaveLength(3);
     expect(lines[0]).toMatch(/^\[reindex\] ts=\d{4}-\d{2}-\d{2}T[^ ]+ event=start jobId="reindex-\d+"/);
-    expect(lines[0]).toContain('ua="curl/8.7.1"');
-    expect(lines[0]).toContain('xff="10.0.0.7"');
-    expect(lines[0]).toContain('seat="barbara"');
+    expect(lines[0]).toMatch(/ua="curl#[0-9a-f]{8}"/);
+    expect(lines[0]).toMatch(/xff_fp="[0-9a-f]{8}"/);
+    expect(lines[0]).not.toContain('10.0.0.7');
+    expect(lines[0]).toContain('claimed_seat="barbara"');
     expect(lines[0]).toContain('cid="abcdef12"');
+    expect(lines[0]).toMatch(/repo="[0-9a-f]{8}:repo"/);
     expect(lines[0]).toContain('scope="all" wait=false append=false');
     expect(lines[1]).toContain('event=refused');
     expect(lines[1]).toContain('scope="retros"');
@@ -187,7 +189,7 @@ describe('POST /indexer/reindex', () => {
 
     const res = await post(app, {});
     expect(res.status).toBe(200);
-    expect(lines[0]).toContain('ua="-" xff="-" seat="-" cid="-"');
+    expect(lines[0]).toContain('ua="-" xff_fp="-" claimed_seat="-" cid="-"');
     expect(lines[1]).toContain('event=complete');
   });
 });
