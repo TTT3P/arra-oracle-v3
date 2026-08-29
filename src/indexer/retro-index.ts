@@ -25,7 +25,7 @@ import { supersedeReplacedSourceDocs } from './reindex-state.ts';
 export async function indexRetrospectives(repoRoot: string, dbPath: string = process.env.ORACLE_DB_PATH || DB_PATH) {
   const resolvedRoot = path.resolve(repoRoot);
   const seenContentHashes = new Set<string>();
-  const documents = collectDocuments({
+  const documents = await collectDocuments({
     config: {
       repoRoot: resolvedRoot,
       dbPath,

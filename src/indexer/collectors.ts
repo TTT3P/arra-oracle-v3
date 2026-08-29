@@ -8,6 +8,7 @@ import type { OracleDocument, IndexerConfig } from '../types.ts';
 import { parseResonanceFile, parseLearningFile, parseRetroFile, parseSecurityCorpusFile } from './parser.ts';
 import { isPsiLearnSource, parsePsiLearnFile } from './learn-doc-source.ts';
 import { discoverCrewPsiDirs, discoverProjectPsiDirs } from './discovery.ts';
+import { forEachYielding, walkMarkdownFiles } from './yield.ts';
 
 const SECURITY_CORPUS_EXTENSIONS = ['.md', '.txt', '.yaml', '.yml', '.json', '.rst'];
 const SECURITY_CORPUS_MAX_FILE_BYTES = 200 * 1024;  // 200KB cap per file
@@ -21,7 +22,21 @@ function skippableFsError(err: unknown): boolean {
 }
 
 /**
- * Recursively get all markdown files in a directory
+ * Read a file enumerated moments ago; a rename/delete in the yield window
+ * between enumeration and read is skipped like an enumeration miss (P2, PR #5).
+ */
+export function readEnumeratedFile(filePath: string): string | null {
+  try {
+    return fs.readFileSync(filePath, 'utf-8');
+  } catch (err) {
+    if (skippableFsError(err)) return null;
+    throw err;
+  }
+}
+
+/**
+ * Recursively get all markdown files in a directory (sync; the indexer uses
+ * the yielding `walkMarkdownFiles` twin in yield.ts)
  */
 export function getAllMarkdownFiles(dir: string): string[] {
   const files: string[] = [];
@@ -63,7 +78,7 @@ interface CollectOpts {
  * Generic collector: scans root source path + project-first vault dirs,
  * deduplicates by content hash, parses files with the given parse function.
  */
-export function collectDocuments(opts: CollectOpts): OracleDocument[] {
+export async function collectDocuments(opts: CollectOpts): Promise<OracleDocument[]> {
   const { config, seenContentHashes, subdir, parseFn, label } = opts;
   const documents: OracleDocument[] = [];
   let totalFiles = 0;
@@ -71,15 +86,16 @@ export function collectDocuments(opts: CollectOpts): OracleDocument[] {
   // 1. Root path
   const sourcePath = path.join(config.repoRoot, `\u03c8/memory/${subdir}`);
   if (fs.existsSync(sourcePath)) {
-    const files = getAllMarkdownFiles(sourcePath);
+    const files = await walkMarkdownFiles(sourcePath);
     if (files.length === 0) {
       console.log(`Warning: ${sourcePath} exists but contains no .md files`);
     }
-    for (const filePath of files) {
-      const content = fs.readFileSync(filePath, 'utf-8');
+    await forEachYielding(files, (filePath) => {
+      const content = readEnumeratedFile(filePath);
+      if (content === null) return;
       const relPath = path.relative(config.repoRoot, filePath);
       documents.push(...parseFn(relPath, content, relPath));
-    }
+    });
     totalFiles += files.length;
   }
 
@@ -93,15 +109,16 @@ export function collectDocuments(opts: CollectOpts): OracleDocument[] {
   for (const projectDir of projectDirs) {
     const projectSubdir = path.join(projectDir, 'memory', subdir);
     if (!fs.existsSync(projectSubdir)) continue;
-    const files = getAllMarkdownFiles(projectSubdir);
-    for (const filePath of files) {
-      const content = fs.readFileSync(filePath, 'utf-8');
+    const files = await walkMarkdownFiles(projectSubdir);
+    await forEachYielding(files, (filePath) => {
+      const content = readEnumeratedFile(filePath);
+      if (content === null) return;
       const contentHash = Bun.hash(content).toString(36);
-      if (seenContentHashes.has(contentHash)) { skippedDupes++; continue; }
+      if (seenContentHashes.has(contentHash)) { skippedDupes++; return; }
       seenContentHashes.add(contentHash);
       const relPath = path.relative(config.repoRoot, filePath);
       documents.push(...parseFn(relPath, content, relPath));
-    }
+    });
     totalFiles += files.length;
   }
 
@@ -148,10 +165,10 @@ function getSecurityCorpusFiles(dir: string): string[] {
  * Defaults on so /learn output is part of the standard indexer scan.
  * ψ/learn/security-corpus remains excluded unless collectSecurityCorpus runs.
  */
-export function collectPsiLearn(opts: {
+export async function collectPsiLearn(opts: {
   config: IndexerConfig;
   seenContentHashes: Set<string>;
-}): OracleDocument[] {
+}): Promise<OracleDocument[]> {
   const { config, seenContentHashes } = opts;
   const documents: OracleDocument[] = [];
   const subPath = config.sourcePaths.learn ?? 'ψ/learn';
@@ -163,29 +180,29 @@ export function collectPsiLearn(opts: {
   let skippedDupes = 0;
   let totalFiles = 0;
   for (const sourcePath of roots) {
-    const files = getAllMarkdownFiles(sourcePath);
+    const files = await walkMarkdownFiles(sourcePath);
     totalFiles += files.length;
-    for (const filePath of files) {
+    await forEachYielding(files, (filePath) => {
       const relPath = path.relative(config.repoRoot, filePath).split(path.sep).join('/');
-      if (!isPsiLearnSource(relPath)) continue;
+      if (!isPsiLearnSource(relPath)) return;
 
-      const content = fs.readFileSync(filePath, 'utf-8');
-      if (!content.trim()) continue;
+      const content = readEnumeratedFile(filePath);
+      if (!content?.trim()) return;
       const contentHash = Bun.hash(content).toString(36);
-      if (seenContentHashes.has(contentHash)) { skippedDupes++; continue; }
+      if (seenContentHashes.has(contentHash)) { skippedDupes++; return; }
       seenContentHashes.add(contentHash);
       documents.push(...parsePsiLearnFile(relPath, content));
-    }
+    });
   }
 
   console.log(`Indexed ${documents.length} ψ/learn documents from ${totalFiles} files (skipped ${skippedDupes} duplicates)`);
   return documents;
 }
 
-export function collectSecurityCorpus(opts: {
+export async function collectSecurityCorpus(opts: {
   config: IndexerConfig;
   seenContentHashes: Set<string>;
-}): OracleDocument[] {
+}): Promise<OracleDocument[]> {
   const { config, seenContentHashes } = opts;
   const documents: OracleDocument[] = [];
 
@@ -200,20 +217,20 @@ export function collectSecurityCorpus(opts: {
 
   const files = getSecurityCorpusFiles(sourcePath);
   let skippedDupes = 0;
-  for (const filePath of files) {
+  await forEachYielding(files, (filePath) => {
     let content: string;
     try {
       content = fs.readFileSync(filePath, 'utf-8');
     } catch {
-      continue;
+      return;
     }
-    if (!content.trim()) continue;
+    if (!content.trim()) return;
     const contentHash = Bun.hash(content).toString(36);
-    if (seenContentHashes.has(contentHash)) { skippedDupes++; continue; }
+    if (seenContentHashes.has(contentHash)) { skippedDupes++; return; }
     seenContentHashes.add(contentHash);
     const relPath = path.relative(config.repoRoot, filePath);
     documents.push(...parseSecurityCorpusFile(relPath, content));
-  }
+  });
 
   console.log(`Indexed ${documents.length} security-corpus documents from ${files.length} files (skipped ${skippedDupes} duplicates)`);
   return documents;
