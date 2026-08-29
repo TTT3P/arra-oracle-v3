@@ -45,7 +45,7 @@ describe('ψ/learn auto-index source discovery', () => {
     expect(Object.values(config.sourcePaths)).toContain('ψ/learn');
   });
 
-  test('standard index scan includes ψ/learn markdown by default', async () => {
+  test('standard index scan includes ψ/learn markdown by default', () => {
     const config = makeConfig();
     const learnDir = path.join(repoRoot, 'ψ', 'learn', 'github.com', 'owner', 'repo');
     const corpusDir = path.join(repoRoot, 'ψ', 'learn', 'security-corpus', 'web', 'docs');
@@ -57,7 +57,7 @@ describe('ψ/learn auto-index source discovery', () => {
     );
     fs.writeFileSync(path.join(corpusDir, 'ignored.md'), 'security corpus is opt-in');
 
-    const docs = await collectPsiLearn({ config, seenContentHashes: new Set() });
+    const docs = collectPsiLearn({ config, seenContentHashes: new Set() });
 
     expect(docs).toHaveLength(1);
     expect(docs[0].type).toBe('learning');

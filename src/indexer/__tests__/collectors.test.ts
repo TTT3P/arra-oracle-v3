@@ -19,7 +19,7 @@ describe('getAllMarkdownFiles', () => {
     }
   });
 
-  test('collects project-first vault ψ/learn files and skips security corpus by default', async () => {
+  test('collects project-first vault ψ/learn files and skips security corpus by default', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'arra-psi-learn-project-'));
     try {
       const learnDir = path.join(tmp, 'github.com', 'Soul-Brews-Studio', 'demo', 'ψ', 'learn', 'codex');
@@ -29,7 +29,7 @@ describe('getAllMarkdownFiles', () => {
       fs.writeFileSync(path.join(learnDir, 'finding.md'), '# Finding\n\n## Lesson\n\nProject-first learn scan works.');
       fs.writeFileSync(path.join(corpusDir, 'skip.md'), '# Skip\n\n## Lesson\n\nSecurity corpus remains opt-in.');
 
-      const docs = await collectPsiLearn({
+      const docs = collectPsiLearn({
         config: {
           repoRoot: tmp,
           dbPath: ':memory:',

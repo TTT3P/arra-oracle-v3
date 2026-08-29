@@ -20,14 +20,14 @@ function config(repoRoot: string) {
   };
 }
 
-test('bulk ψ/learn ingest derives project from local org/repo directories', async () => {
+test('bulk ψ/learn ingest derives project from local org/repo directories', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'arra-derive-project-'));
   try {
     const file = path.join(root, 'ψ', 'learn', 'Soul-Brews-Studio', 'demo', 'ops', 'runbook.md');
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, '# Runbook\n\n## Finding\n\nRetry retry deploy failures with traced context.', 'utf8');
 
-    const docs = await collectPsiLearn({ config: config(root), seenContentHashes: new Set() });
+    const docs = collectPsiLearn({ config: config(root), seenContentHashes: new Set() });
 
     expect(docs).toHaveLength(1);
     expect(docs[0].project).toBe('github.com/soul-brews-studio/demo');

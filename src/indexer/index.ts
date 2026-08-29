@@ -28,7 +28,6 @@ import { parseResonanceFile, parseLearningFile, parseRetroFile, parseDistillatio
 import { getEmbeddingModels } from '../vector/factory.ts';
 import { collectDocuments, collectPsiLearn, collectSecurityCorpus } from './collectors.ts';
 import { collectPsiInbox } from './collect-inbox.ts';
-import { groupBySourceFile, yieldEvery, yieldToEventLoop } from './yield.ts';
 import {
   activeIndexerWhere,
   changedDocumentIds,
@@ -104,16 +103,14 @@ export class OracleIndexer {
 
     // Collect documents from all source types
     const shared = { config: this.config, seenContentHashes: this.seenContentHashes };
-    // Collectors yield to the event loop between file batches (src/indexer/yield.ts)
-    // so health probes and searches are served while a reindex is running.
     const documents: OracleDocument[] = [
-      ...await collectDocuments({ ...shared, subdir: 'resonance', parseFn: parseResonanceFile, label: 'resonance' }),
-      ...await collectDocuments({ ...shared, subdir: 'learnings', parseFn: parseLearningFile, label: 'learning' }),
-      ...await collectDocuments({ ...shared, subdir: 'retrospectives', parseFn: parseRetroFile, label: 'retrospective' }),
-      ...await collectDocuments({ ...shared, subdir: 'distillations', parseFn: parseDistillationFile, label: 'distillation' }),
-      ...await collectPsiLearn(shared),
-      ...await collectPsiInbox(shared),
-      ...await collectSecurityCorpus(shared),
+      ...collectDocuments({ ...shared, subdir: 'resonance', parseFn: parseResonanceFile, label: 'resonance' }),
+      ...collectDocuments({ ...shared, subdir: 'learnings', parseFn: parseLearningFile, label: 'learning' }),
+      ...collectDocuments({ ...shared, subdir: 'retrospectives', parseFn: parseRetroFile, label: 'retrospective' }),
+      ...collectDocuments({ ...shared, subdir: 'distillations', parseFn: parseDistillationFile, label: 'distillation' }),
+      ...collectPsiLearn(shared),
+      ...collectPsiInbox(shared),
+      ...collectSecurityCorpus(shared),
     ];
 
     // Safety: if we found zero source documents but the DB has existing
@@ -201,17 +198,8 @@ export class OracleIndexer {
     // Store in SQLite + FTS5 first. Vector work is queued afterwards so
     // embedding failures cannot roll back the source-of-truth text index.
     await storeDocuments(this.sqlite, this.db, null, this.project, indexDocuments, { tenantId });
-    // Supersede + vector-job enqueue are per-source-file / per-doc SQL loops:
-    // run them in source-file groups with a yield between groups (a source
-    // file's chunks must stay in one group — supersede compares against them).
-    let superseded = 0;
-    const vectorJobs = { queued: 0, skipped: 0, failed: 0 };
-    for (const group of groupBySourceFile(indexDocuments, yieldEvery())) {
-      await yieldToEventLoop();
-      superseded += supersedeReplacedSourceDocs(this.db, group, tenantId);
-      const jobs = safeEnqueueVectorJobs(this.db, group, changedIds);
-      vectorJobs.queued += jobs.queued; vectorJobs.skipped += jobs.skipped; vectorJobs.failed += jobs.failed;
-    }
+    const superseded = supersedeReplacedSourceDocs(this.db, indexDocuments, tenantId);
+    const vectorJobs = safeEnqueueVectorJobs(this.db, indexDocuments, changedIds);
 
     setIndexingStatus(this.db, this.config, false, indexDocuments.length, indexDocuments.length);
     console.log(`Indexed ${indexDocuments.length} chunks (SQLite + FTS5)`);

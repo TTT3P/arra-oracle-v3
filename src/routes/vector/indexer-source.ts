@@ -37,15 +37,15 @@ function toVectorDocs(documents: OracleDocument[]): VectorDocument[] {
   }));
 }
 
-export async function loadVaultVectorDocuments(repoRoot = resolveIndexerRepoRoot()): Promise<LoadedVectorIndexDocuments> {
+export function loadVaultVectorDocuments(repoRoot = resolveIndexerRepoRoot()): LoadedVectorIndexDocuments {
   const config = createIndexerConfig(repoRoot);
   const shared = { config, seenContentHashes: new Set<string>() };
   const documents: OracleDocument[] = [
-    ...await collectDocuments({ ...shared, subdir: 'resonance', parseFn: parseResonanceFile, label: 'resonance' }),
-    ...await collectDocuments({ ...shared, subdir: 'learnings', parseFn: parseLearningFile, label: 'learning' }),
-    ...await collectDocuments({ ...shared, subdir: 'retrospectives', parseFn: parseRetroFile, label: 'retrospective' }),
-    ...await collectDocuments({ ...shared, subdir: 'distillations', parseFn: parseDistillationFile, label: 'distillation' }),
-    ...await collectSecurityCorpus(shared),
+    ...collectDocuments({ ...shared, subdir: 'resonance', parseFn: parseResonanceFile, label: 'resonance' }),
+    ...collectDocuments({ ...shared, subdir: 'learnings', parseFn: parseLearningFile, label: 'learning' }),
+    ...collectDocuments({ ...shared, subdir: 'retrospectives', parseFn: parseRetroFile, label: 'retrospective' }),
+    ...collectDocuments({ ...shared, subdir: 'distillations', parseFn: parseDistillationFile, label: 'distillation' }),
+    ...collectSecurityCorpus(shared),
   ];
 
   return { source: 'vault', repoRoot, docs: toVectorDocs(chunkDocumentsForIndexing(documents)) };
@@ -96,14 +96,14 @@ export function loadSqliteVectorDocuments(dbPath = DB_PATH): LoadedVectorIndexDo
   }
 }
 
-export async function loadVectorIndexDocuments(opts: {
+export function loadVectorIndexDocuments(opts: {
   source?: string | null;
   repoRoot?: string | null;
   dbPath?: string;
-} = {}): Promise<LoadedVectorIndexDocuments> {
+} = {}): LoadedVectorIndexDocuments {
   const source = resolveVectorIndexSource(opts.source);
   if (source !== 'sqlite') {
-    const vault = await loadVaultVectorDocuments(opts.repoRoot ? resolveIndexerRepoRoot(opts.repoRoot) : undefined);
+    const vault = loadVaultVectorDocuments(opts.repoRoot ? resolveIndexerRepoRoot(opts.repoRoot) : undefined);
     if (source === 'vault' && vault.docs.length === 0) {
       throw new Error(`Refusing vault vector reindex: found 0 vault documents at ${vault.repoRoot}`);
     }
