@@ -14,6 +14,9 @@ LAUNCH_AGENT_DIR="${ARRA_ORACLE_LAUNCHAGENT_DIR:-$HOME/Library/LaunchAgents}"
 PLIST_PATH="$LAUNCH_AGENT_DIR/$LABEL.plist"
 INSTALL_ONLY="${ARRA_ORACLE_INSTALL_ONLY:-0}"
 PORT="${ARRA_ORACLE_PORT:-47778}"
+# Seconds to wait for /api/health/live after kickstart. Boot can exceed 25 s when the
+# vector sidecar preflight times out (2026-08-30); 15 s produced a false rc 1.
+HEALTH_WAIT_SECONDS="${ARRA_ORACLE_HEALTH_WAIT_SECONDS:-90}"
 # Entity/pointer sidecar backfill worker (default on; set 0 to disable).
 ENTITY_BACKFILL="${ORACLE_ENTITY_BACKFILL:-1}"
 # Embedder boot-probe budget (ms) and Ollama keep-alive for embed calls (2026-08-29).
@@ -130,12 +133,12 @@ fi
 launchctl bootstrap "$domain" "$PLIST_PATH"
 launchctl kickstart -k "$domain/$LABEL"
 launchctl print "$domain/$LABEL" >/dev/null
-for _ in {1..60}; do
+for (( i = 0; i < HEALTH_WAIT_SECONDS * 2; i++ )); do
   if /usr/bin/curl -fsS "http://127.0.0.1:$PORT/api/health/live" >/dev/null 2>&1; then
-    echo "running: $LABEL (http://127.0.0.1:$PORT)"
+    echo "running: $LABEL (http://127.0.0.1:$PORT) after $(( i / 2 )) s"
     exit 0
   fi
-  sleep 0.25
+  sleep 0.5
 done
-echo "error: $LABEL loaded but failed its health check; inspect $DATA_DIR/oracle-server.error.log" >&2
+echo "error: $LABEL loaded but /api/health/live did not answer within ${HEALTH_WAIT_SECONDS}s; inspect $DATA_DIR/oracle-server.error.log" >&2
 exit 1

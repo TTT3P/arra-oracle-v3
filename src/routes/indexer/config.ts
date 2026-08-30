@@ -1,4 +1,5 @@
 import { Elysia } from 'elysia';
+import { resolveOllamaBaseUrl } from '../../vector/embeddings.ts';
 import { getEmbeddingModels } from '../../vector/factory.ts';
 
 export const configEndpoint = new Elysia().get('/indexer/config', async () => {
@@ -17,7 +18,11 @@ export const configEndpoint = new Elysia().get('/indexer/config', async () => {
 
   let ollamaModels: string[] = [];
   try {
-    const res = await fetch('http://localhost:11434/api/tags');
+    // Same resolver as the embedder (OLLAMA_BASE_URL / OLLAMA_HOST): a hardcoded
+    // localhost:11434 hid every model behind a tunnel or remote host (2026-08-30).
+    const res = await fetch(`${resolveOllamaBaseUrl(process.env.OLLAMA_BASE_URL, process.env.OLLAMA_HOST)}/api/tags`, {
+      signal: AbortSignal.timeout(2_000),
+    });
     if (res.ok) {
       const data = await res.json() as { models?: Array<{ name: string }> };
       ollamaModels = (data.models || []).map(m => m.name);
