@@ -1,4 +1,5 @@
 /** Env/config resolver for the optional embedder capability. */
+import { ensureEmbedderWarmKeepalive } from './embedder-warm.ts';
 import { createEmbeddingProvider } from './embeddings.ts';
 import type { EmbedderConfig, EmbeddingProvider, EmbeddingProviderType } from './types.ts';
 
@@ -36,7 +37,8 @@ export type EmbedderRuntimeStatus = {
 };
 
 type ProbePreset = { provider?: string; model?: string; endpoint?: string; embedder?: EmbedderConfig };
-export const DEFAULT_PROBE_TIMEOUT_MS = 8_000;
+// 15 s (PR-C): first embed after idle measured 8.21 s on Mac Ollama even when pinned.
+export const DEFAULT_PROBE_TIMEOUT_MS = 15_000;
 type ProbeOptions = { timeoutMs?: number; text?: string };
 type RuntimeProbeOptions = ProbeOptions & { force?: boolean; preset?: ProbePreset; ttlMs?: number; probe?: () => Promise<EmbedderRuntimeStatus> };
 
@@ -115,6 +117,7 @@ export async function probeConfiguredEmbedder(
 }
 
 export async function readEmbedderRuntimeStatus(options: RuntimeProbeOptions = {}): Promise<EmbedderRuntimeStatus> {
+  ensureEmbedderWarmKeepalive(() => readEmbedderRuntimeStatus({ force: true }));
   const ttlMs = positiveInt(process.env.ORACLE_EMBEDDER_STATUS_TTL_MS, options.ttlMs ?? 15_000);
   const checkedAt = runtimeStatus?.checkedAt ? Date.parse(runtimeStatus.checkedAt) : NaN;
   if (!options.force && runtimeStatus?.checkedAt && (!Number.isFinite(checkedAt) || Date.now() - checkedAt < ttlMs)) return runtimeStatus;
@@ -159,8 +162,6 @@ export async function probeEmbeddingProvider(
   selection: EmbeddingProviderSelection,
   options: ProbeOptions = {},
 ): Promise<EmbedderRuntimeStatus> {
-  // 8 s (was 2 s): a cold Ollama model load takes several seconds and a 2 s probe
-  // turned every cold start into a false 'degraded / FTS-only' verdict (2026-08-29).
   const timeoutMs = positiveInt(process.env.ORACLE_EMBEDDER_PROBE_TIMEOUT_MS, options.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS);
   try {
     const pending = provider.embed([options.text ?? 'oracle embedder boot probe'], 'query');

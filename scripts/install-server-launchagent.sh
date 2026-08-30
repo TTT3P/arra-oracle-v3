@@ -17,7 +17,7 @@ PORT="${ARRA_ORACLE_PORT:-47778}"
 # Entity/pointer sidecar backfill worker (default on; set 0 to disable).
 ENTITY_BACKFILL="${ORACLE_ENTITY_BACKFILL:-1}"
 # Embedder boot-probe budget (ms) and Ollama keep-alive for embed calls (2026-08-29).
-EMBEDDER_PROBE_TIMEOUT_MS="${ORACLE_EMBEDDER_PROBE_TIMEOUT_MS:-8000}"
+EMBEDDER_PROBE_TIMEOUT_MS="${ORACLE_EMBEDDER_PROBE_TIMEOUT_MS:-15000}"
 EMBED_KEEP_ALIVE="${ORACLE_EMBED_KEEP_ALIVE:--1}"
 
 if [[ -z "$BUN_BIN" || ! -x "$BUN_BIN" ]]; then
