@@ -5,7 +5,7 @@ import type { EmbeddingProvider } from '../../src/vector/types.ts';
 /**
  * 2026-08-29: a cold Ollama model load takes several seconds; with a 2 s probe every
  * cold start was reported 'degraded' and search silently ran FTS-only. The default
- * budget is now 8 s (ORACLE_EMBEDDER_PROBE_TIMEOUT_MS still overrides it).
+ * budget is now 15 s (ORACLE_EMBEDDER_PROBE_TIMEOUT_MS still overrides it).
  */
 const saved = process.env.ORACLE_EMBEDDER_PROBE_TIMEOUT_MS;
 afterEach(() => {
@@ -22,8 +22,8 @@ function slowProvider(delayMs: number): EmbeddingProvider {
 }
 const selection = { provider: 'ollama', source: 'auto-default', explicit: false } as const;
 
-test('default probe budget is 8 s', () => {
-  expect(DEFAULT_PROBE_TIMEOUT_MS).toBe(8_000);
+test('default probe budget is 15 s', () => {
+  expect(DEFAULT_PROBE_TIMEOUT_MS).toBe(15_000);
 });
 
 test('a 2.5 s cold load is "connected" under the default budget (it was "degraded" at 2 s)', async () => {

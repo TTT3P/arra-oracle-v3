@@ -96,7 +96,7 @@ export async function inspectCollection(
       enabled: true, count: 0, ok: false, status: 'down', error: unavailable,
     };
   }
-  const timeout = parseInt(process.env.ORACLE_VECTOR_HEALTH_TIMEOUT || '8000', 10);
+  const timeout = parseInt(process.env.ORACLE_VECTOR_HEALTH_TIMEOUT || '15000', 10);
   const preset = configToModels(config)[key];
   if (!preset) throw new Error(`Collection ${key} is not enabled`);
   const store = createVectorStoreForModel(preset);

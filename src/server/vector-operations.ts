@@ -119,7 +119,7 @@ export const localVectorOperations: VectorOperations = {
     };
   },
 
-  async health(timeoutMs = parseInt(process.env.ORACLE_VECTOR_HEALTH_TIMEOUT || '8000', 10)) {
+  async health(timeoutMs = parseInt(process.env.ORACLE_VECTOR_HEALTH_TIMEOUT || '15000', 10)) {
     const models = getEmbeddingModels();
     const engines: Array<{ key: string; model: string; collection: string; ok: boolean; error?: string }> = [];
 
