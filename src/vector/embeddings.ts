@@ -1,10 +1,12 @@
 import type { EmbeddingProvider, EmbeddingProviderType, EmbedType } from './types.ts';
 import { NoneEmbeddings, RemoteHttpEmbeddings } from './embedding-backends.ts';
+import { degradedTimeoutMs, isEmbedderRuntimeDegraded } from './embedder-runtime-state.ts';
 import { EmbeddingFallbackChain } from './fallback-chain.ts';
+import { createOllamaEmbedderWithUrlFallback } from './ollama-url-chain.ts';
 import { GeminiEmbeddings } from './providers/gemini.ts';
 export { GeminiEmbeddings } from './providers/gemini.ts';
 export type FallbackEvent = { from: string; to?: string; error: string };
-export type EmbeddingProviderOptions = { url?: string; dimensions?: number; fallbackChain?: EmbeddingProviderType[]; fallback?: EmbeddingProviderType };
+export type EmbeddingProviderOptions = { url?: string; dimensions?: number; fallbackChain?: EmbeddingProviderType[]; fallback?: EmbeddingProviderType; fastFail?: boolean };
 export class ChromaDBInternalEmbeddings implements EmbeddingProvider {
   readonly name = 'chromadb-internal';
   readonly dimensions = 384; // all-MiniLM-L6-v2 default
@@ -13,7 +15,7 @@ export class ChromaDBInternalEmbeddings implements EmbeddingProvider {
   }
 }
 export class OllamaEmbeddings implements EmbeddingProvider {
-  readonly name = 'ollama';
+  readonly name: string;
   dimensions: number;
   private baseUrl: string;
   private model: string;
@@ -31,8 +33,13 @@ export class OllamaEmbeddings implements EmbeddingProvider {
    * or a Go duration string ('30m', '24h').
    */
   private keepAlive: number | string;
-  constructor(config: { baseUrl?: string; model?: string } = {}) {
+  /** When runtime status is already degraded, skip retries and clamp the
+   *  timeout — 3×30 s retries amplified the 08-31 outage into 24–112 s searches. */
+  private fastFailWhenDegraded: boolean;
+  constructor(config: { baseUrl?: string; model?: string; label?: string; fastFail?: boolean } = {}) {
     this.baseUrl = resolveOllamaBaseUrl(config.baseUrl, process.env.OLLAMA_BASE_URL, process.env.OLLAMA_HOST);
+    this.name = config.label || 'ollama';
+    this.fastFailWhenDegraded = config.fastFail ?? true;
     this.model = config.model || 'nomic-embed-text';
     this.attempts = positiveInt(process.env.ORACLE_EMBED_ATTEMPTS, 3);
     this.retryDelayMs = positiveInt(process.env.ORACLE_EMBED_RETRY_DELAY_MS, 150);
@@ -90,9 +97,12 @@ export class OllamaEmbeddings implements EmbeddingProvider {
   }
   private async embedBatchWithRetry(input: string[]): Promise<{ embeddings: number[][] }> {
     let lastError: unknown;
-    for (let attempt = 1; attempt <= this.attempts; attempt++) {
+    const fastFail = this.fastFailWhenDegraded && isEmbedderRuntimeDegraded();
+    const attempts = fastFail ? 1 : this.attempts;
+    const timeoutMs = fastFail ? Math.min(this.timeoutMs, degradedTimeoutMs()) : this.timeoutMs;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
       try {
         const response = await fetch(`${this.baseUrl}/api/embed`, {
           method: 'POST',
@@ -112,13 +122,13 @@ export class OllamaEmbeddings implements EmbeddingProvider {
         return { embeddings };
       } catch (err) {
         lastError = err;
-        if (attempt < this.attempts) await sleep(this.retryDelayMs * attempt);
+        if (attempt < attempts) await sleep(this.retryDelayMs * attempt);
       } finally {
         clearTimeout(timeout);
       }
     }
     const message = lastError instanceof Error ? lastError.message : String(lastError);
-    throw new Error(`Ollama embedding failed after ${this.attempts} attempts: ${message}`, { cause: lastError });
+    throw new Error(`Ollama embedding failed after ${attempts} attempts: ${message}`, { cause: lastError });
   }
 }
 export function parseKeepAlive(raw: string | undefined): number | string {
@@ -131,7 +141,7 @@ function positiveInt(raw: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
-function resolveOllamaBaseUrl(...values: Array<string | undefined>): string {
+export function resolveOllamaBaseUrl(...values: Array<string | undefined>): string {
   const raw = values.map((value) => value?.trim()).find(Boolean) || 'http://localhost:11434';
   const trimmed = raw.replace(/\/+$/, '');
   return /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
@@ -210,14 +220,14 @@ export function createEmbeddingProvider(
 function createSingleEmbeddingProvider(
   type: EmbeddingProviderType,
   model?: string,
-  options: { url?: string; dimensions?: number } = {},
+  options: { url?: string; dimensions?: number; fastFail?: boolean } = {},
 ): EmbeddingProvider {
   switch (type) {
     case 'none':
       return new NoneEmbeddings();
     case 'local':
     case 'ollama':
-      return new OllamaEmbeddings({ model, baseUrl: options.url });
+      return createOllamaEmbedderWithUrlFallback({ model, baseUrl: options.url, fastFail: options.fastFail });
     case 'remote':
       return new RemoteHttpEmbeddings({ model, url: options.url, dimensions: options.dimensions });
     case 'openai':

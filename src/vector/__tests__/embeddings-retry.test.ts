@@ -8,6 +8,7 @@ const originalBatchSize = process.env.ORACLE_EMBED_BATCH_SIZE;
 const originalTimeout = process.env.ORACLE_EMBED_TIMEOUT_MS;
 const originalOllamaBaseUrl = process.env.OLLAMA_BASE_URL;
 const originalOllamaHost = process.env.OLLAMA_HOST;
+const originalKeepAlive = process.env.ORACLE_EMBED_KEEP_ALIVE;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -23,6 +24,8 @@ afterEach(() => {
   else process.env.OLLAMA_BASE_URL = originalOllamaBaseUrl;
   if (originalOllamaHost === undefined) delete process.env.OLLAMA_HOST;
   else process.env.OLLAMA_HOST = originalOllamaHost;
+  if (originalKeepAlive === undefined) delete process.env.ORACLE_EMBED_KEEP_ALIVE;
+  else process.env.ORACLE_EMBED_KEEP_ALIVE = originalKeepAlive;
 });
 
 describe('OllamaEmbeddings retry diagnostics (#987)', () => {
@@ -48,6 +51,7 @@ describe('OllamaEmbeddings retry diagnostics (#987)', () => {
 
   it('batches inputs through Ollama /api/embed', async () => {
     process.env.ORACLE_EMBED_BATCH_SIZE = '2';
+    delete process.env.ORACLE_EMBED_KEEP_ALIVE;
     const requests: unknown[] = [];
     globalThis.fetch = (async (_url, init) => {
       requests.push(JSON.parse(String(init?.body)));
@@ -59,9 +63,10 @@ describe('OllamaEmbeddings retry diagnostics (#987)', () => {
     const vectors = await embedder.embed(['a', 'b', 'c'], 'passage');
 
     expect(vectors).toEqual([[0, 1], [1, 2], [0, 1]]);
+    // keep_alive: -1 pins the model in Ollama (PR #8, 3cc961a4)
     expect(requests).toEqual([
-      { model: 'bge-m3', input: ['passage: a', 'passage: b'] },
-      { model: 'bge-m3', input: ['passage: c'] },
+      { model: 'bge-m3', input: ['passage: a', 'passage: b'], keep_alive: -1 },
+      { model: 'bge-m3', input: ['passage: c'], keep_alive: -1 },
     ]);
     expect(embedder.dimensions).toBe(2);
   });

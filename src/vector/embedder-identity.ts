@@ -139,7 +139,8 @@ function policyFromEnv(): Policy {
 }
 
 function defaultModelName(provider: string): string | undefined {
-  const first = provider.split('>')[0];
+  // 'ollama(http://…)' — a URL-labeled chain member — identifies as plain 'ollama'.
+  const first = provider.split('>')[0].replace(/\(.*\)$/, '');
   return ({
     ollama: 'nomic-embed-text',
     local: 'nomic-embed-text',

@@ -1,7 +1,16 @@
 /** Env/config resolver for the optional embedder capability. */
+import {
+  clearEmbedderRuntimeStatus,
+  peekEmbedderRuntimeStatus,
+  setEmbedderRuntimeStatus,
+  type EmbedderRuntimeStatus,
+  type EmbeddingProviderSelection,
+} from './embedder-runtime-state.ts';
 import { ensureEmbedderWarmKeepalive } from './embedder-warm.ts';
 import { createEmbeddingProvider } from './embeddings.ts';
 import type { EmbedderConfig, EmbeddingProvider, EmbeddingProviderType } from './types.ts';
+
+export { setEmbedderRuntimeStatus, type EmbedderRuntimeStatus, type EmbeddingProviderSelection };
 
 const VALID = new Set<EmbeddingProviderType>([
   'none',
@@ -20,29 +29,12 @@ export function resolveEmbeddingProviderType(
   return resolveEmbeddingProviderSelection(configured).provider;
 }
 
-export type EmbeddingProviderSelection = {
-  provider: EmbeddingProviderType;
-  source: 'configured' | 'legacy-env' | 'env' | 'auto-default';
-  explicit: boolean;
-};
-
-export type EmbedderRuntimeStatus = {
-  status: 'unknown' | 'connected' | 'degraded';
-  provider: EmbeddingProviderType;
-  source: EmbeddingProviderSelection['source'];
-  explicit: boolean;
-  checkedAt?: string;
-  reason?: string;
-  consecutiveFailures?: number;
-};
-
 type ProbePreset = { provider?: string; model?: string; endpoint?: string; embedder?: EmbedderConfig };
 // 15 s (PR-C): first embed after idle measured 8.21 s on Mac Ollama even when pinned.
 export const DEFAULT_PROBE_TIMEOUT_MS = 15_000;
 type ProbeOptions = { timeoutMs?: number; text?: string };
 type RuntimeProbeOptions = ProbeOptions & { force?: boolean; preset?: ProbePreset; ttlMs?: number; probe?: () => Promise<EmbedderRuntimeStatus> };
 
-let runtimeStatus: EmbedderRuntimeStatus | null = null;
 let runtimeProbe: Promise<EmbedderRuntimeStatus> | null = null;
 
 export function resolveEmbeddingProviderSelection(
@@ -71,18 +63,14 @@ export function resolveEmbeddingFallbackChain(configured?: EmbeddingProviderType
 }
 
 export function getEmbedderRuntimeStatus(): EmbedderRuntimeStatus {
-  if (runtimeStatus) return runtimeStatus;
+  const current = peekEmbedderRuntimeStatus();
+  if (current) return current;
   const selected = resolveEmbeddingProviderSelection();
   return { status: 'unknown', ...selected };
 }
 
-export function setEmbedderRuntimeStatus(status: EmbedderRuntimeStatus): EmbedderRuntimeStatus {
-  runtimeStatus = status;
-  return status;
-}
-
 export function clearEmbedderRuntimeStatusForTests(): void {
-  runtimeStatus = null;
+  clearEmbedderRuntimeStatus();
   runtimeProbe = null;
 }
 
@@ -109,6 +97,9 @@ export async function probeConfiguredEmbedder(
       url: embedder?.url ?? preset?.endpoint,
       dimensions: embedder?.dimensions,
       fallbackChain: resolveEmbeddingFallbackChain(embedder?.fallbackChain ?? (embedder?.fallback ? [embedder.fallback] : undefined)),
+      // The probe is the recovery path out of 'degraded' — it must keep its
+      // full budget, or a degraded status could never clear after an outage.
+      fastFail: false,
     });
     return await probeEmbeddingProvider(provider, selection, options);
   } catch (error) {
@@ -119,8 +110,9 @@ export async function probeConfiguredEmbedder(
 export async function readEmbedderRuntimeStatus(options: RuntimeProbeOptions = {}): Promise<EmbedderRuntimeStatus> {
   ensureEmbedderWarmKeepalive(() => readEmbedderRuntimeStatus({ force: true }));
   const ttlMs = positiveInt(process.env.ORACLE_EMBEDDER_STATUS_TTL_MS, options.ttlMs ?? 15_000);
-  const checkedAt = runtimeStatus?.checkedAt ? Date.parse(runtimeStatus.checkedAt) : NaN;
-  if (!options.force && runtimeStatus?.checkedAt && (!Number.isFinite(checkedAt) || Date.now() - checkedAt < ttlMs)) return runtimeStatus;
+  const current = peekEmbedderRuntimeStatus();
+  const checkedAt = current?.checkedAt ? Date.parse(current.checkedAt) : NaN;
+  if (!options.force && current?.checkedAt && (!Number.isFinite(checkedAt) || Date.now() - checkedAt < ttlMs)) return current;
   if (runtimeProbe && !options.force) return runtimeProbe;
   runtimeProbe = (options.probe ? options.probe() : probeConfiguredEmbedder(options.preset, options))
     .finally(() => { runtimeProbe = null; });
@@ -132,7 +124,8 @@ export function recordEmbedderRuntimeSuccess(selection: EmbeddingProviderSelecti
 }
 
 export function recordEmbedderRuntimeFailure(selection: EmbeddingProviderSelection, error: unknown): EmbedderRuntimeStatus {
-  const failures = runtimeStatus?.provider === selection.provider ? (runtimeStatus.consecutiveFailures ?? 0) + 1 : 1;
+  const current = peekEmbedderRuntimeStatus();
+  const failures = current?.provider === selection.provider ? (current.consecutiveFailures ?? 0) + 1 : 1;
   const threshold = positiveInt(process.env.ORACLE_EMBEDDER_FAILURE_THRESHOLD, 1);
   if (failures < threshold) {
     return setEmbedderRuntimeStatus({ ...getEmbedderRuntimeStatus(), ...selection, checkedAt: new Date().toISOString(), consecutiveFailures: failures });
