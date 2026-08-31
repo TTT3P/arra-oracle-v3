@@ -28,8 +28,8 @@ several still trace to 2026-08-16/17, and Type A bundle-restore (section 5) is s
   The generated `com.tt3p.arra-vector` LaunchAgent uses `RunAtLoad`, restarts
   failed exits, and keeps logs under `~/.arra-oracle-v2/`. Find the live listener
   with `lsof -iTCP:8081 -sTCP:LISTEN`.
-- Config: repo `.env` (gitignored) — `OLLAMA_BASE_URL=http://127.0.0.1:11434`,
-  `ORACLE_EMBEDDING_MODEL=bge-m3`, `VECTOR_URL=http://localhost:8081`;
+- Config: repo `.env` (gitignored; Bun auto-loads it from the launchd cwd → binds the HTTP server ONLY; MCP seats
+  take `OLLAMA_BASE_URL` from their launcher/`.mcp.json`, default :11434) — `OLLAMA_BASE_URL=http://127.0.0.1:11435` (tunnel → win GPU), `ORACLE_EMBEDDING_MODEL=bge-m3`, `VECTOR_URL=http://localhost:8081`;
   DB `settings` row `canonical_source_root` =
   `/Users/trirongyinwichapoon/tt3p/agent-hub/orchestrator-vnext`; tenant `default`
 - Embeddings: local Ollama, model `bge-m3` (`ollama list` must show it)

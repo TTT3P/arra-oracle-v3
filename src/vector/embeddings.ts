@@ -131,7 +131,8 @@ function positiveInt(raw: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
-function resolveOllamaBaseUrl(...values: Array<string | undefined>): string {
+/** Single resolver for the Ollama base URL: explicit → OLLAMA_BASE_URL → OLLAMA_HOST → localhost:11434. */
+export function resolveOllamaBaseUrl(...values: Array<string | undefined>): string {
   const raw = values.map((value) => value?.trim()).find(Boolean) || 'http://localhost:11434';
   const trimmed = raw.replace(/\/+$/, '');
   return /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
