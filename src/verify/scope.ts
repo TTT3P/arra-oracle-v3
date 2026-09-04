@@ -5,24 +5,70 @@
  * ALL rows against one caller root, producing false orphans for every other
  * project's documents. This module resolves the caller's project identity and
  * classifies each DB row's relationship to it. Rows with project=NULL stay
- * "ambient" (legacy behavior, Class E — never auto-flagged when the caller is
- * scoped); rows positively owned by another project are excluded.
+ * "ambient" (legacy behavior, Class E — never auto-flagged); rows positively
+ * owned by another project are excluded.
+ *
+ * Fail-closed rules (Riddler delta, round 2):
+ * - An explicit project override that does not normalize is refused outright.
+ * - Mutation (check:false) requires a root-proven scope: the repoRoot must
+ *   resolve to a project, and any override must agree with it. Read-only runs
+ *   may proceed unscoped (legacy report) or with an operator override.
  */
 import { detectProject } from '../server/project-detect.ts';
 import { normalizeProject } from '../tools/learn-support.ts';
 
-/** created_by values whose content is canonical in the DB — the source_file
- *  is nominal and may never have existed on disk. Never file-orphans. */
-const DB_NATIVE_CREATORS = new Set(['oracle_learn', 'arra_learn', 'oracle_recovery', 'zhuge']);
+/** created_by values whose content is canonical in the DB (or imported from an
+ *  external vault) — the source_file is nominal or lives outside any repo
+ *  root. Never file-orphans. Sources: oracle_learn/arra_learn (learn tools),
+ *  oracle_recovery (rescue), zhuge (legacy principle import), seed
+ *  (cli/commands/seed.ts), import-obsidian (routes/files/doc.ts). */
+const DB_NATIVE_CREATORS = new Set([
+  'oracle_learn', 'arra_learn', 'oracle_recovery', 'zhuge', 'seed', 'import-obsidian',
+]);
 
 export function isDbNativeCreator(createdBy: string | null | undefined): boolean {
   return createdBy != null && DB_NATIVE_CREATORS.has(createdBy);
 }
 
-/** Resolve the caller's project: explicit override first, then repoRoot detection. */
-export function resolveCallerProject(repoRoot: string, override?: string | null): string | null {
-  if (override) return normalizeProject(override);
-  return detectProject(repoRoot);
+export type CallerScope = {
+  /** Effective scope project (override wins), or null = unscoped legacy read. */
+  project: string | null;
+  /** Project detected from repoRoot (independent of override), or null. */
+  detected: string | null;
+  variants: string[] | null;
+  /** True when mutation (check:false) is permitted under this scope. */
+  mutationAllowed: boolean;
+  /** Human-readable reason when mutation is not permitted. */
+  mutationRefusedReason?: string;
+};
+
+/** Resolve the caller scope. Throws on an invalid explicit override. */
+export function resolveCallerScope(repoRoot: string, override?: string | null): CallerScope {
+  const detected = detectProject(repoRoot);
+  let project = detected;
+  if (override != null && override.trim() !== '') {
+    const normalized = normalizeProject(override);
+    if (!normalized) {
+      throw new Error(`oracle_verify: invalid project override '${override}' — refusing (fail-closed)`);
+    }
+    project = normalized;
+  }
+  const variants = project ? projectVariants(project) : null;
+  if (!detected) {
+    return {
+      project, detected, variants,
+      mutationAllowed: false,
+      mutationRefusedReason: `repoRoot '${repoRoot}' does not resolve to a project — check:false refused (fail-closed)`,
+    };
+  }
+  if (project !== detected) {
+    return {
+      project, detected, variants,
+      mutationAllowed: false,
+      mutationRefusedReason: `project override '${project}' does not match the repoRoot's project '${detected}' — check:false refused (fail-closed)`,
+    };
+  }
+  return { project, detected, variants, mutationAllowed: true };
 }
 
 /** Accepted stored forms for one canonical project id (DB has both). */

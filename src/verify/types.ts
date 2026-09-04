@@ -21,8 +21,10 @@ export interface VerifyResult {
   untracked: string[];
   unattributedOrphans: string[];
   dbNative: string[];
-  /** How this run was scoped: caller project id, or null = legacy unscoped. */
-  scope: { project: string | null; scoped: boolean };
+  /** How this run was scoped. project = effective scope (override wins);
+   *  detected = project resolved from repoRoot; mutationAllowed = whether
+   *  check:false would be permitted under this scope. */
+  scope: { project: string | null; detected: string | null; scoped: boolean; mutationAllowed: boolean };
   mismatches: VerifyMismatch[];
   recommendation: string;
   fixedOrphans?: number;
