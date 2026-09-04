@@ -5,47 +5,34 @@
  * Detects: healthy, missing, orphaned, drifted, untracked files.
  *
  * Philosophy: "Nothing is Deleted" — orphans are flagged, not removed.
+ *
+ * P1 scoping (plan 2026-09-04): the shared DB holds many projects' documents.
+ * Rows owned by another project are excluded; rows with project=NULL stay
+ * ambient but their orphans are reported separately and never auto-flagged
+ * when the caller is scoped; superseded rows and DB-native rows never count.
  */
 
 import path from 'path';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { db, oracleDocuments } from '../db/index.ts';
 import { currentTenantId } from '../middleware/tenant.ts';
 import { walkMarkdownFiles } from './files.ts';
 import { normalizeSourceFile } from './paths.ts';
+import { classifyRowScope, isDbNativeCreator, projectVariants, resolveCallerProject } from './scope.ts';
+import type { VerifyMismatch, VerifyResult } from './types.ts';
 
-export interface VerifyResult {
-  counts: {
-    healthy: number;
-    missing: number;
-    orphaned: number;
-    drifted: number;
-    untracked: number;
-  };
-  missing: string[];
-  orphaned: string[];
-  drifted: string[];
-  untracked: string[];
-  mismatches: VerifyMismatch[];
-  recommendation: string;
-  fixedOrphans?: number;
-}
-
-export interface VerifyMismatch {
-  kind: 'missing' | 'orphaned' | 'drifted' | 'untracked';
-  sourceFile: string;
-  ids?: string[];
-  indexedAt?: number;
-  mtimeMs?: number;
-}
+export type { VerifyMismatch, VerifyResult } from './types.ts';
 
 export function verifyKnowledgeBase(opts: {
   check?: boolean;
   type?: string;
   repoRoot: string;
+  project?: string;
 }): VerifyResult {
   const { check = true, type, repoRoot } = opts;
   const tenantId = currentTenantId();
+  const callerProject = resolveCallerProject(repoRoot, opts.project);
+  const callerVariants = callerProject ? projectVariants(callerProject) : null;
 
   // 1. Walk indexed directories on disk
   const indexedDirs = [
@@ -64,51 +51,52 @@ export function verifyKnowledgeBase(opts: {
     }
   }
 
-  // 2. Query DB for all indexed documents
+  // 2. Query DB. Superseded rows are already retired — never re-classify them.
   const normalizedType = type?.trim();
   const typeFilter = normalizedType && normalizedType !== 'all' ? normalizedType : undefined;
-  const fields = {
+  const conditions = [isNull(oracleDocuments.supersededBy)];
+  if (typeFilter) conditions.push(eq(oracleDocuments.type, typeFilter));
+  if (tenantId) conditions.push(eq(oracleDocuments.tenantId, tenantId));
+  const dbRows = db.select({
     id: oracleDocuments.id,
     sourceFile: oracleDocuments.sourceFile,
     indexedAt: oracleDocuments.indexedAt,
     type: oracleDocuments.type,
-  };
-  const dbRows = typeFilter && tenantId
-    ? db.select(fields)
-        .from(oracleDocuments)
-        .where(and(eq(oracleDocuments.type, typeFilter), eq(oracleDocuments.tenantId, tenantId)))
-        .all()
-    : typeFilter
-    ? db.select({
-        ...fields,
-      })
-        .from(oracleDocuments)
-        .where(eq(oracleDocuments.type, typeFilter))
-        .all()
-    : tenantId
-      ? db.select(fields)
-        .from(oracleDocuments)
-        .where(eq(oracleDocuments.tenantId, tenantId))
-        .all()
-      : db.select(fields)
-        .from(oracleDocuments)
-        .all();
+    project: oracleDocuments.project,
+    createdBy: oracleDocuments.createdBy,
+  })
+    .from(oracleDocuments)
+    .where(and(...conditions))
+    .all();
 
-  // Build map: sourceFile -> { indexedAt, ids[] }
+  // Build map: sourceFile -> { indexedAt, ids[], owned }
   // Multiple DB entries can point to the same source file (chunked docs)
-  const dbFileMap = new Map<string, { indexedAt: number; ids: string[] }>();
+  const dbFileMap = new Map<string, { indexedAt: number; ids: string[]; owned: boolean }>();
+  const dbNativeSet = new Set<string>();
+  let foreignExcluded = 0;
   for (const row of dbRows) {
     const sourceFile = normalizeSourceFile(row.sourceFile, repoRoot);
     if (!sourceFile) continue;
+    if (isDbNativeCreator(row.createdBy)) {
+      dbNativeSet.add(sourceFile);
+      continue;
+    }
+    const rowScope = classifyRowScope(row.project, callerVariants);
+    if (rowScope === 'foreign') {
+      foreignExcluded++;
+      continue;
+    }
+    const owned = rowScope === 'owned';
     const existing = dbFileMap.get(sourceFile);
     if (existing) {
       existing.ids.push(row.id);
+      existing.owned ||= owned;
       // Use the latest indexedAt
       if (row.indexedAt > existing.indexedAt) {
         existing.indexedAt = row.indexedAt;
       }
     } else {
-      dbFileMap.set(sourceFile, { indexedAt: row.indexedAt, ids: [row.id] });
+      dbFileMap.set(sourceFile, { indexedAt: row.indexedAt, ids: [row.id], owned });
     }
   }
 
@@ -117,6 +105,7 @@ export function verifyKnowledgeBase(opts: {
   const missing: string[] = [];
   const drifted: string[] = [];
   const orphaned: string[] = [];
+  const unattributedOrphans: string[] = [];
 
   // Tenant-scoped requests can only prove ownership for DB-backed files.
   // Keep global disk-only "missing"/"untracked" reporting for unscoped runs.
@@ -125,8 +114,8 @@ export function verifyKnowledgeBase(opts: {
     const mtimeMs = diskFiles.get(relPath);
     const dbEntry = dbFileMap.get(relPath);
     if (!dbEntry) {
-      // File on disk, not in DB
-      missing.push(relPath);
+      // File on disk, not in DB (DB-native rows don't claim the path)
+      if (!dbNativeSet.has(relPath)) missing.push(relPath);
     } else if (mtimeMs === undefined) {
       continue;
     } else {
@@ -139,15 +128,13 @@ export function verifyKnowledgeBase(opts: {
     }
   }
 
-  // Check each DB entry for orphans (in DB, not on disk)
-  const seenDbFiles = new Set<string>();
-  for (const [sourceFile] of dbFileMap) {
-    if (seenDbFiles.has(sourceFile)) continue;
-    seenDbFiles.add(sourceFile);
-
-    if (!diskFiles.has(sourceFile)) {
-      orphaned.push(sourceFile);
-    }
+  // Check each DB entry for orphans (in DB, not on disk). With a scoped
+  // caller, only project-proven rows may be called orphaned; project=NULL
+  // rows are reported separately (Class E) and never auto-flagged.
+  for (const [sourceFile, entry] of dbFileMap) {
+    if (diskFiles.has(sourceFile)) continue;
+    if (callerVariants && !entry.owned) unattributedOrphans.push(sourceFile);
+    else orphaned.push(sourceFile);
   }
 
   // 4. Count untracked files outside indexed dirs.
@@ -163,7 +150,7 @@ export function verifyKnowledgeBase(opts: {
     }
   }
 
-  // 5. Auto-fix orphans if check=false
+  // 5. Auto-fix orphans if check=false — scoped 'orphaned' bucket only
   let fixedOrphans = 0;
   if (!check && orphaned.length > 0) {
     const now = Date.now();
@@ -200,7 +187,9 @@ export function verifyKnowledgeBase(opts: {
     if (drifted.length > 0) parts.push(`${drifted.length} drifted since last index`);
     recommendation = `Run \`bun run index\` to fix ${issues} issues (${parts.join(', ')})`;
   }
-
+  if (unattributedOrphans.length > 0) {
+    recommendation += ` ${unattributedOrphans.length} unattributed (project=NULL) rows lack a file under this root — held, not flagged.`;
+  }
   if (fixedOrphans > 0) {
     recommendation += `. Flagged ${fixedOrphans} orphaned entries as '_verified_orphan'.`;
   }
@@ -225,11 +214,17 @@ export function verifyKnowledgeBase(opts: {
       orphaned: orphaned.length,
       drifted: drifted.length,
       untracked: untracked.length,
+      dbNative: dbNativeSet.size,
+      foreignExcluded,
+      unattributedOrphans: unattributedOrphans.length,
     },
     missing,
     orphaned,
     drifted,
     untracked,
+    unattributedOrphans,
+    dbNative: [...dbNativeSet],
+    scope: { project: callerProject, scoped: callerVariants !== null },
     mismatches,
     recommendation,
     ...(fixedOrphans > 0 ? { fixedOrphans } : {}),

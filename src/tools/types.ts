@@ -97,6 +97,7 @@ export interface OracleInboxInput {
 export interface OracleVerifyInput {
   check?: boolean;
   type?: string;
+  project?: string;
 }
 
 export interface OracleScheduleAddInput {
