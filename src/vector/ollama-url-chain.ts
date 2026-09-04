@@ -10,6 +10,7 @@
  */
 import { EmbeddingFallbackChain } from './fallback-chain.ts';
 import { OllamaEmbeddings, resolveOllamaBaseUrl } from './embeddings.ts';
+import { OllamaCompatGate } from './ollama-compat.ts';
 import type { EmbeddingProvider, EmbedType } from './types.ts';
 
 export const DEFAULT_EMBED_COOLDOWN_MS = 60_000;
@@ -37,12 +38,21 @@ export function createOllamaEmbedderWithUrlFallback(config: OllamaUrlChainConfig
   if (urls.length === 1) {
     return new OllamaEmbeddings({ model: config.model, baseUrl: primaryUrl, fastFail: config.fastFail });
   }
-  const providers = urls.map((url) => new OllamaEmbeddings({
-    model: config.model,
-    baseUrl: url,
-    fastFail: config.fastFail,
-    label: ollamaEndpointLabel(url),
-  }));
+  const model = config.model || 'nomic-embed-text';
+  const providers = urls.map((url, index) => {
+    const inner = new OllamaEmbeddings({
+      model: config.model,
+      baseUrl: url,
+      fastFail: config.fastFail,
+      label: ollamaEndpointLabel(url),
+    });
+    if (index === 0) return inner; // primary needs no compat gate against itself
+    // Silent-corruption guard: a fallback must PROVE it serves the primary's
+    // model (same digest) before any of its vectors are accepted.
+    const gate = new OllamaCompatGate(primaryUrl, url, model);
+    void gate.prewarm(); // learn the primary digest while it is healthy
+    return gatedProvider(inner, gate);
+  });
   const chain = new EmbeddingFallbackChain(providers, {
     sticky: false, // always prefer the primary (win GPU) when it answers
     cooldownMs: cooldownMs(),
@@ -55,6 +65,17 @@ export function createOllamaEmbedderWithUrlFallback(config: OllamaUrlChainConfig
     ),
   });
   return logEndpointSwitches(chain);
+}
+
+function gatedProvider(inner: OllamaEmbeddings, gate: OllamaCompatGate): EmbeddingProvider {
+  return {
+    name: inner.name,
+    get dimensions() { return inner.dimensions; },
+    async embed(texts: string[], type?: EmbedType, signal?: AbortSignal) {
+      await gate.ensure(); // throws fail-closed on mismatch/unverifiable
+      return inner.embed(texts, type, signal);
+    },
+  };
 }
 
 /** Log which endpoint serves embeds — only when it changes, never per call. */

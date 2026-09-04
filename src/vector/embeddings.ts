@@ -4,7 +4,9 @@ import { degradedTimeoutMs, isEmbedderRuntimeDegraded } from './embedder-runtime
 import { EmbeddingFallbackChain } from './fallback-chain.ts';
 import { createOllamaEmbedderWithUrlFallback } from './ollama-url-chain.ts';
 import { GeminiEmbeddings } from './providers/gemini.ts';
+import { OpenAIEmbeddings } from './providers/openai.ts';
 export { GeminiEmbeddings } from './providers/gemini.ts';
+export { OpenAIEmbeddings };
 export type FallbackEvent = { from: string; to?: string; error: string };
 export type EmbeddingProviderOptions = { url?: string; dimensions?: number; fallbackChain?: EmbeddingProviderType[]; fallback?: EmbeddingProviderType; fastFail?: boolean };
 export class ChromaDBInternalEmbeddings implements EmbeddingProvider {
@@ -36,46 +38,44 @@ export class OllamaEmbeddings implements EmbeddingProvider {
   /** When runtime status is already degraded, skip retries and clamp the
    *  timeout — 3×30 s retries amplified the 08-31 outage into 24–112 s searches. */
   private fastFailWhenDegraded: boolean;
+  /** KNOWN model dim, if any — responses that disagree are REJECTED, never adopted. */
+  private declaredDims: number | undefined;
   constructor(config: { baseUrl?: string; model?: string; label?: string; fastFail?: boolean } = {}) {
     this.baseUrl = resolveOllamaBaseUrl(config.baseUrl, process.env.OLLAMA_BASE_URL, process.env.OLLAMA_HOST);
     this.name = config.label || 'ollama';
-    this.fastFailWhenDegraded = config.fastFail ?? true;
+    this.fastFailWhenDegraded = config.fastFail ?? fastFailDefaultFromEnv();
     this.model = config.model || 'nomic-embed-text';
     this.attempts = positiveInt(process.env.ORACLE_EMBED_ATTEMPTS, 3);
     this.retryDelayMs = positiveInt(process.env.ORACLE_EMBED_RETRY_DELAY_MS, 150);
     this.batchSize = positiveInt(process.env.ORACLE_EMBED_BATCH_SIZE, 50);
     this.timeoutMs = positiveInt(process.env.ORACLE_EMBED_TIMEOUT_MS, 30_000);
     this.keepAlive = parseKeepAlive(process.env.ORACLE_EMBED_KEEP_ALIVE);
-    const KNOWN_DIMS: Record<string, number> = {
-      'nomic-embed-text': 768,
-      'qwen3-embedding': 1024,
-      'qwen3-embedding:0.6b': 1024,
-      'qwen3-embedding:4b': 2560,
-      'qwen3-embedding:8b': 4096,
-      'bge-m3': 1024,
-      'mxbai-embed-large': 1024,
-      'all-minilm': 384,
-      'qllama/multilingual-e5-large-instruct': 1024,
-      'qllama/multilingual-e5-large-instruct:latest': 1024,
-      'multilingual-e5-large': 1024,
-      'multilingual-e5-large-instruct': 1024,
-      'snowflake-arctic-embed2': 1024,
-    };
-    this.dimensions = KNOWN_DIMS[this.model] || 768;
+    this.declaredDims = KNOWN_DIMS[this.model];
+    this.dimensions = this.declaredDims || 768;
   }
-  async embed(texts: string[], type?: EmbedType): Promise<number[][]> {
+  async embed(texts: string[], type?: EmbedType, signal?: AbortSignal): Promise<number[][]> {
     const prepared = texts.map(text => this.prepareText(text, type));
     const embeddings: number[][] = [];
     for (let i = 0; i < prepared.length; i += this.batchSize) {
       const batch = prepared.slice(i, i + this.batchSize);
-      const data = await this.embedBatchWithRetry(batch);
+      const data = await this.embedBatchWithRetry(batch, signal);
+      this.assertDimensions(data.embeddings);
       embeddings.push(...data.embeddings);
-      if (!this._dimensionsDetected && data.embeddings[0]?.length > 0) {
-        this.dimensions = data.embeddings[0].length;
-        this._dimensionsDetected = true;
-      }
     }
     return embeddings;
+  }
+  /** Silent-corruption guard: wrong-sized vectors are rejected, not stored. */
+  private assertDimensions(vectors: number[][]): void {
+    const expected = this.declaredDims ?? (this._dimensionsDetected ? this.dimensions : vectors[0]?.length);
+    for (const vector of vectors) {
+      if (expected !== undefined && vector.length !== expected) {
+        throw new Error(`Ollama endpoint ${this.baseUrl} returned a ${vector.length}-dim vector for model '${this.model}' (expected ${expected}) — rejected by dimension guard`);
+      }
+    }
+    if (!this._dimensionsDetected && vectors[0]?.length) {
+      if (this.declaredDims === undefined) this.dimensions = vectors[0].length;
+      this._dimensionsDetected = true;
+    }
   }
   private prepareText(text: string, type?: EmbedType): string {
     let truncated = text.length > 2000 ? text.slice(0, 2000) : text;
@@ -95,13 +95,16 @@ export class OllamaEmbeddings implements EmbeddingProvider {
     }
     return truncated;
   }
-  private async embedBatchWithRetry(input: string[]): Promise<{ embeddings: number[][] }> {
+  private async embedBatchWithRetry(input: string[], signal?: AbortSignal): Promise<{ embeddings: number[][] }> {
     let lastError: unknown;
     const fastFail = this.fastFailWhenDegraded && isEmbedderRuntimeDegraded();
     const attempts = fastFail ? 1 : this.attempts;
     const timeoutMs = fastFail ? Math.min(this.timeoutMs, degradedTimeoutMs()) : this.timeoutMs;
     for (let attempt = 1; attempt <= attempts; attempt++) {
+      if (signal?.aborted) throw new Error('embed aborted by caller');
       const controller = new AbortController();
+      const onAbort = () => controller.abort();
+      signal?.addEventListener('abort', onAbort);
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
       try {
         const response = await fetch(`${this.baseUrl}/api/embed`, {
@@ -122,14 +125,38 @@ export class OllamaEmbeddings implements EmbeddingProvider {
         return { embeddings };
       } catch (err) {
         lastError = err;
+        if (signal?.aborted) break; // caller cancelled — no point retrying
         if (attempt < attempts) await sleep(this.retryDelayMs * attempt);
       } finally {
+        signal?.removeEventListener('abort', onAbort);
         clearTimeout(timeout);
       }
     }
     const message = lastError instanceof Error ? lastError.message : String(lastError);
     throw new Error(`Ollama embedding failed after ${attempts} attempts: ${message}`, { cause: lastError });
   }
+}
+const KNOWN_DIMS: Record<string, number> = {
+  'nomic-embed-text': 768,
+  'qwen3-embedding': 1024,
+  'qwen3-embedding:0.6b': 1024,
+  'qwen3-embedding:4b': 2560,
+  'qwen3-embedding:8b': 4096,
+  'bge-m3': 1024,
+  'mxbai-embed-large': 1024,
+  'all-minilm': 384,
+  'qllama/multilingual-e5-large-instruct': 1024,
+  'qllama/multilingual-e5-large-instruct:latest': 1024,
+  'multilingual-e5-large': 1024,
+  'multilingual-e5-large-instruct': 1024,
+  'snowflake-arctic-embed2': 1024,
+};
+/** fast-fail is env-armed so a deploy without env is a true no-op (Riddler PR#11 r2 #2):
+ *  ORACLE_EMBED_FASTFAIL_WHEN_DEGRADED=1/0 wins; else on iff the URL-fallback env is set. */
+function fastFailDefaultFromEnv(): boolean {
+  const raw = process.env.ORACLE_EMBED_FASTFAIL_WHEN_DEGRADED?.trim().toLowerCase();
+  if (raw) return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+  return Boolean(process.env.OLLAMA_FALLBACK_BASE_URLS?.trim());
 }
 export function parseKeepAlive(raw: string | undefined): number | string {
   const value = raw?.trim();
@@ -148,40 +175,6 @@ export function resolveOllamaBaseUrl(...values: Array<string | undefined>): stri
   return /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
 }
 function sleep(ms: number): Promise<void> { return new Promise(resolve => setTimeout(resolve, ms)); }
-export class OpenAIEmbeddings implements EmbeddingProvider {
-  readonly name = 'openai';
-  readonly dimensions: number;
-  private apiKey: string;
-  private model: string;
-  constructor(config: { apiKey?: string; model?: string } = {}) {
-    this.apiKey = config.apiKey || process.env.OPENAI_API_KEY || '';
-    this.model = config.model || 'text-embedding-3-small';
-    this.dimensions = this.model === 'text-embedding-3-large' ? 3072 : 1536;
-    if (!this.apiKey) {
-      throw new Error('OpenAI API key required. Set OPENAI_API_KEY.');
-    }
-  }
-  async embed(texts: string[], _type?: EmbedType): Promise<number[][]> {
-    const response = await fetch('https://api.openai.com/v1/embeddings', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ input: texts, model: this.model }),
-    });
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`OpenAI API error: ${error}`);
-    }
-    const data = await response.json() as {
-      data: { embedding: number[]; index: number }[];
-    };
-    return data.data
-      .sort((a, b) => a.index - b.index)
-      .map(d => d.embedding);
-  }
-}
 export class FallbackEmbeddings implements EmbeddingProvider {
   readonly name: string;
   readonly dimensions: number;

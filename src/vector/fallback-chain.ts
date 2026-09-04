@@ -43,6 +43,8 @@ export class EmbeddingFallbackChain implements EmbeddingProvider {
   private readonly cooldownMs: number;
   private readonly halfOpenTimeoutMs: number;
   private readonly skipUntil: number[];
+  /** Single-flight guard: at most ONE half-open probe per provider at a time. */
+  private readonly halfOpenBusy: boolean[];
   private readonly initialBackoffMs: number;
   private readonly logger: (message: string) => void;
   private readonly maxBackoffMs: number;
@@ -67,6 +69,7 @@ export class EmbeddingFallbackChain implements EmbeddingProvider {
     this.cooldownMs = options.cooldownMs ?? 0;
     this.halfOpenTimeoutMs = options.halfOpenTimeoutMs ?? 2_500;
     this.skipUntil = providers.map(() => 0);
+    this.halfOpenBusy = providers.map(() => false);
     this.initialBackoffMs = options.initialBackoffMs ?? 100;
     this.logger = options.logger ?? ((message) => console.info(message));
     this.maxBackoffMs = options.maxBackoffMs ?? 2_000;
@@ -86,16 +89,21 @@ export class EmbeddingFallbackChain implements EmbeddingProvider {
     for (let attemptIndex = 0; attemptIndex < order.length; attemptIndex += 1) {
       const index = order[attemptIndex];
       const provider = this.providers[index];
+      // A provider that failed before gets a bounded half-open re-try so a
+      // still-dead endpoint cannot re-amplify latency once per cooldown —
+      // and only ONE caller probes it at a time (no thundering herd).
+      const halfOpen = this.cooldownMs > 0 && this.skipUntil[index] > 0;
+      if (halfOpen && this.halfOpenBusy[index]) {
+        lastError = lastError ?? new Error(`provider '${provider.name}' half-open probe already in flight`);
+        continue;
+      }
       const stats = this.statsFor(provider.name);
       stats.attempts += 1;
+      if (halfOpen) this.halfOpenBusy[index] = true;
       try {
-        // A provider that failed before gets a bounded half-open re-try so a
-        // still-dead endpoint cannot re-amplify latency once per cooldown.
-        const halfOpen = this.cooldownMs > 0 && this.skipUntil[index] > 0;
-        const pending = provider.embed(texts, type);
         const vectors = halfOpen
-          ? await raceTimeout(pending, this.halfOpenTimeoutMs, provider.name)
-          : await pending;
+          ? await this.halfOpenProbe(provider, texts, type)
+          : await provider.embed(texts, type);
         this.skipUntil[index] = 0;
         stats.successes += 1;
         this.successes += 1;
@@ -113,6 +121,8 @@ export class EmbeddingFallbackChain implements EmbeddingProvider {
         const next = this.providers[order[attemptIndex + 1]];
         this.logFallback({ from: provider.name, to: next?.name, error: message });
         if (next) await this.sleep(this.delayFor(attemptIndex));
+      } finally {
+        if (halfOpen) this.halfOpenBusy[index] = false;
       }
     }
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
@@ -158,6 +168,17 @@ export class EmbeddingFallbackChain implements EmbeddingProvider {
     );
   }
 
+  /** Bounded half-open re-try that ABORTS the underlying request on timeout. */
+  private halfOpenProbe(provider: EmbeddingProvider, texts: string[], type?: EmbedType): Promise<number[][]> {
+    const controller = new AbortController();
+    return raceTimeout(
+      provider.embed(texts, type, controller.signal),
+      this.halfOpenTimeoutMs,
+      provider.name,
+      () => controller.abort(),
+    );
+  }
+
   private statsFor(provider: string): FallbackProviderStats {
     return this.providerStats[provider] ??= { attempts: 0, failures: 0, successes: 0 };
   }
@@ -167,10 +188,18 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function raceTimeout(pending: Promise<number[][]>, ms: number, provider: string): Promise<number[][]> {
+function raceTimeout(
+  pending: Promise<number[][]>,
+  ms: number,
+  provider: string,
+  onTimeout?: () => void,
+): Promise<number[][]> {
   pending.catch(() => undefined);
   return new Promise<number[][]>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`half-open probe of '${provider}' timed out after ${ms}ms`)), ms);
+    const timer = setTimeout(() => {
+      onTimeout?.(); // abort the underlying request — don't just abandon it
+      reject(new Error(`half-open probe of '${provider}' timed out after ${ms}ms`));
+    }, ms);
     pending.then(
       (value) => { clearTimeout(timer); resolve(value); },
       (error) => { clearTimeout(timer); reject(error); },

@@ -139,8 +139,10 @@ function policyFromEnv(): Policy {
 }
 
 function defaultModelName(provider: string): string | undefined {
-  // 'ollama(http://…)' — a URL-labeled chain member — identifies as plain 'ollama'.
-  const first = provider.split('>')[0].replace(/\(.*\)$/, '');
+  // NOTE (Riddler PR#11 r2 #1): URL-labeled names like 'ollama(http://…)' are
+  // deliberately NOT normalized here — an unpinned-model URL chain must FAIL
+  // the identity check loudly rather than masquerade as plain 'ollama'.
+  const first = provider.split('>')[0];
   return ({
     ollama: 'nomic-embed-text',
     local: 'nomic-embed-text',

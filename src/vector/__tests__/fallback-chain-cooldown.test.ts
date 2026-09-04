@@ -73,6 +73,52 @@ describe('EmbeddingFallbackChain cooldown circuit breaker', () => {
     expect(a.calls).toBe(2);
   });
 
+  it('half-open is single-flight: concurrent callers do not herd the recovering provider', async () => {
+    let mode: 'reject' | 'hang' = 'reject';
+    const a = provider('a', () => mode === 'reject'
+      ? Promise.reject(new Error('down'))
+      : new Promise<number[][]>(() => undefined));
+    const b = provider('b', () => Promise.resolve([[1]]));
+    const chain = new EmbeddingFallbackChain([a, b], {
+      cooldownMs: 20, halfOpenTimeoutMs: 30, sticky: false, sleep: noSleep, logger: silent,
+    });
+
+    await chain.embed(['x']); // a rejects → cooldown
+    mode = 'hang';
+    await wait(25); // cooldown expired → half-open eligible
+    const results = await Promise.all([chain.embed(['x']), chain.embed(['x'])]);
+
+    expect(results).toEqual([[[1]], [[1]]]);
+    expect(a.calls).toBe(2); // 1 initial failure + exactly ONE half-open probe for the pair
+    expect(b.calls).toBe(3);
+  });
+
+  it('half-open timeout ABORTS the underlying request (signal propagation)', async () => {
+    let mode: 'reject' | 'hang' = 'reject';
+    let sawAbort = false;
+    const a: EmbeddingProvider = {
+      name: 'a', dimensions: 4,
+      embed(_texts, _type, signal) {
+        if (mode === 'reject') return Promise.reject(new Error('down'));
+        return new Promise<number[][]>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => { sawAbort = true; reject(new Error('aborted')); });
+        });
+      },
+    };
+    const b = provider('b', () => Promise.resolve([[1]]));
+    const chain = new EmbeddingFallbackChain([a, b], {
+      cooldownMs: 20, halfOpenTimeoutMs: 30, sticky: false, sleep: noSleep, logger: silent,
+    });
+
+    await chain.embed(['x']);
+    mode = 'hang';
+    await wait(25);
+    const vectors = await chain.embed(['x']); // probe hangs → aborted at 30ms → b serves
+    expect(vectors).toEqual([[1]]);
+    await wait(5);
+    expect(sawAbort).toBe(true);
+  });
+
   it('keeps legacy behavior when cooldown is disabled', async () => {
     const a = provider('a', () => Promise.reject(new Error('down')));
     const b = provider('b', () => Promise.resolve([[1]]));
