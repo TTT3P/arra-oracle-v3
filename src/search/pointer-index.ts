@@ -1,4 +1,4 @@
-import { and, eq, or, type SQL } from 'drizzle-orm';
+import { and, eq, or, sql, type SQL } from 'drizzle-orm';
 import type { Database } from 'bun:sqlite';
 import { drizzle, type BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
 import * as schema from '../db/schema.ts';
@@ -35,6 +35,18 @@ const STOPWORDS = new Set(['and', 'are', 'for', 'from', 'into', 'the', 'this', '
 
 function toDb(input: OracleDbInput): OracleDb {
   return 'prepare' in input ? drizzle(input, { schema }) : input;
+}
+
+// Whether `oracle_pointer_index` exists at all. A fresh database before migration legitimately
+// lacks it — that is the ONLY condition under which the pointer writers skip. Deciding this from a
+// catalog lookup (not by pattern-matching an error string) means every actual failure during the
+// writes — a constraint, a trigger, a corrupt row — propagates and rolls the transaction back,
+// instead of being mistaken for "table missing" and swallowed into a silent partial commit.
+function pointerTableExists(db: OracleDb): boolean {
+  const row = db.get(
+    sql`SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'oracle_pointer_index' LIMIT 1`,
+  );
+  return row != null;
 }
 
 export function documentPointers(input: PointerInput): Pointer[] {
@@ -74,79 +86,74 @@ export function replaceDocumentPointersBulk(
   inputs: PointerInput[],
 ): void {
   if (inputs.length === 0) return;
-  try {
-    const db = toDb(dbInput);
-    const tenant = tenantId?.trim() || 'default';
-    // A document id repeated within one batch is last-write-wins — exactly what running the
-    // per-document path in sequence leaves behind (the later write removes the id from every row,
-    // then re-adds only its own keys). Collapse to the last input per id BEFORE removal and
-    // accumulation; otherwise the id would be UNIONed across both inputs' keys while the
-    // documents / FTS / entity rows storeDocuments writes keep only the last, leaving the indexes
-    // inconsistent.
-    const lastByDoc = new Map<string, PointerInput>();
-    for (const input of inputs) lastByDoc.set(input.documentId, input);
-    const effective = [...lastByDoc.values()];
-    // One scan removes every re-indexed document from its stale pointer rows.
-    removeDocumentPointers(db, tenant, effective.map((input) => input.documentId));
-    // Accumulate the fresh memberships so each pointer key is written exactly once.
-    const accumulated = new Map<string, { kind: PointerKind; key: string; docIds: Set<string> }>();
-    for (const input of effective) {
-      for (const item of documentPointers(input)) {
-        const id = pointerId(tenant, item.kind, item.key);
-        const entry = accumulated.get(id);
-        if (entry) entry.docIds.add(input.documentId);
-        else accumulated.set(id, { kind: item.kind, key: item.key, docIds: new Set([input.documentId]) });
-      }
+  const db = toDb(dbInput);
+  // Fresh-DB skip decided by catalog, not by error text — see pointerTableExists.
+  if (!pointerTableExists(db)) return;
+  const tenant = tenantId?.trim() || 'default';
+  // A document id repeated within one batch is last-write-wins — exactly what running the
+  // per-document path in sequence leaves behind (the later write removes the id from every row,
+  // then re-adds only its own keys). Collapse to the last input per id BEFORE removal and
+  // accumulation; otherwise the id would be UNIONed across both inputs' keys while the
+  // documents / FTS / entity rows storeDocuments writes keep only the last, leaving the indexes
+  // inconsistent.
+  const lastByDoc = new Map<string, PointerInput>();
+  for (const input of inputs) lastByDoc.set(input.documentId, input);
+  const effective = [...lastByDoc.values()];
+  // One scan removes every re-indexed document from its stale pointer rows.
+  removeDocumentPointers(db, tenant, effective.map((input) => input.documentId));
+  // Accumulate the fresh memberships so each pointer key is written exactly once.
+  const accumulated = new Map<string, { kind: PointerKind; key: string; docIds: Set<string> }>();
+  for (const input of effective) {
+    for (const item of documentPointers(input)) {
+      const id = pointerId(tenant, item.kind, item.key);
+      const entry = accumulated.get(id);
+      if (entry) entry.docIds.add(input.documentId);
+      else accumulated.set(id, { kind: item.kind, key: item.key, docIds: new Set([input.documentId]) });
     }
-    const now = Date.now();
-    for (const [id, entry] of accumulated) {
-      const existingRow = db.select({ docIds: schema.oraclePointerIndex.docIds })
-        .from(schema.oraclePointerIndex)
-        .where(eq(schema.oraclePointerIndex.id, id))
-        .get();
-      const docIds = [...new Set([...parseIds(existingRow?.docIds), ...entry.docIds])].sort();
-      db.insert(schema.oraclePointerIndex)
-        .values({ id, tenantId: tenant, kind: entry.kind, key: entry.key, docIds: JSON.stringify(docIds), updatedAt: now })
-        .onConflictDoUpdate({
-          target: schema.oraclePointerIndex.id,
-          set: { docIds: JSON.stringify(docIds), updatedAt: now },
-        })
-        .run();
-    }
-  } catch (error) {
-    if (!missingPointerTable(error)) throw error;
+  }
+  const now = Date.now();
+  for (const [id, entry] of accumulated) {
+    const existingRow = db.select({ docIds: schema.oraclePointerIndex.docIds })
+      .from(schema.oraclePointerIndex)
+      .where(eq(schema.oraclePointerIndex.id, id))
+      .get();
+    const docIds = [...new Set([...parseIds(existingRow?.docIds), ...entry.docIds])].sort();
+    db.insert(schema.oraclePointerIndex)
+      .values({ id, tenantId: tenant, kind: entry.kind, key: entry.key, docIds: JSON.stringify(docIds), updatedAt: now })
+      .onConflictDoUpdate({
+        target: schema.oraclePointerIndex.id,
+        set: { docIds: JSON.stringify(docIds), updatedAt: now },
+      })
+      .run();
   }
 }
 
 export function removeDocumentPointers(dbInput: OracleDbInput, tenantId: string | undefined, documentIds: string[]): void {
   if (documentIds.length === 0) return;
-  try {
-    const db = toDb(dbInput);
-    const tenant = tenantId?.trim() || 'default';
-    const rows = db.select({
-      id: schema.oraclePointerIndex.id,
-      kind: schema.oraclePointerIndex.kind,
-      key: schema.oraclePointerIndex.key,
-      docIds: schema.oraclePointerIndex.docIds,
-    }).from(schema.oraclePointerIndex)
-      .where(eq(schema.oraclePointerIndex.tenantId, tenant))
-      .all() as PointerRow[];
-    const remove = new Set(documentIds);
-    const now = Date.now();
-    for (const row of rows) {
-      const existing = parseIds(row.docIds);
-      const next = existing.filter((id) => !remove.has(id));
-      if (next.length === 0) {
-        db.delete(schema.oraclePointerIndex).where(eq(schema.oraclePointerIndex.id, row.id)).run();
-      } else if (next.length !== existing.length) {
-        db.update(schema.oraclePointerIndex)
-          .set({ docIds: JSON.stringify(next), updatedAt: now })
-          .where(eq(schema.oraclePointerIndex.id, row.id))
-          .run();
-      }
+  const db = toDb(dbInput);
+  if (!pointerTableExists(db)) return;
+  const tenant = tenantId?.trim() || 'default';
+  const rows = db.select({
+    id: schema.oraclePointerIndex.id,
+    kind: schema.oraclePointerIndex.kind,
+    key: schema.oraclePointerIndex.key,
+    docIds: schema.oraclePointerIndex.docIds,
+  }).from(schema.oraclePointerIndex)
+    .where(eq(schema.oraclePointerIndex.tenantId, tenant))
+    .all() as PointerRow[];
+  const remove = new Set(documentIds);
+  const now = Date.now();
+  for (const row of rows) {
+    const existing = parseIds(row.docIds);
+    const next = existing.filter((id) => !remove.has(id));
+    if (next.length === 0) {
+      db.delete(schema.oraclePointerIndex).where(eq(schema.oraclePointerIndex.id, row.id)).run();
+    } else if (next.length !== existing.length) {
+      db.update(schema.oraclePointerIndex)
+        .set({ docIds: JSON.stringify(next), updatedAt: now })
+        .where(eq(schema.oraclePointerIndex.id, row.id))
+        .run();
     }
-  } catch (error) {
-    if (!missingPointerTable(error)) throw error;
   }
 }
 
@@ -156,14 +163,10 @@ export function queryPointerIndex(dbInput: OracleDbInput, options: PointerSearch
   const tenantId = options.tenantId?.trim() || 'default';
   const keys = queryPointers(options.query);
   if (keys.length === 0) return [];
-  try {
-    const rows = lookupPointerRows(db, tenantId, keys);
-    const ranked = rankDocs(rows, keys);
-    return hydratePointerDocs(db, ranked, { ...options, tenantId, limit });
-  } catch (error) {
-    if (missingPointerTable(error)) return [];
-    throw error;
-  }
+  if (!pointerTableExists(db)) return [];
+  const rows = lookupPointerRows(db, tenantId, keys);
+  const ranked = rankDocs(rows, keys);
+  return hydratePointerDocs(db, ranked, { ...options, tenantId, limit });
 }
 
 export function queryPointers(query: string): Pointer[] {
@@ -218,11 +221,3 @@ function adjacent(words: string[]): string[] { return words.slice(0, -1).map((wo
 // mid-batch — after removal has already cleared memberships and some keys were re-upserted — and let
 // storeDocuments commit that partial pointer state. Require the SQLite no-such-table phrasing so
 // every other error propagates and rolls the transaction back.
-function missingPointerTable(error: unknown): boolean {
-  // The name must END here: the trailing lookahead rejects a longer identifier that merely starts
-  // with it (e.g. "no such table: oracle_pointer_index_shadow" — a different, missing table). \b
-  // would not help since it treats "_" as a word char; the explicit class excludes it.
-  return /no such table:\s*(?:[A-Za-z0-9_]+\.)?"?oracle_pointer_index"?(?![A-Za-z0-9_])/i.test(
-    String(error instanceof Error ? error.message : error),
-  );
-}

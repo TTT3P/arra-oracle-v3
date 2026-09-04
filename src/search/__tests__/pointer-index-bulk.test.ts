@@ -21,7 +21,7 @@ import type { Database } from 'bun:sqlite';
 import { createDatabase } from '../../db/index.ts';
 import type { DatabaseConnection } from '../../db/create.ts';
 import { storeDocuments } from '../../indexer/storage.ts';
-import { replaceDocumentPointers, replaceDocumentPointersBulk, type PointerInput } from '../pointer-index.ts';
+import { queryPointerIndex, replaceDocumentPointers, replaceDocumentPointersBulk, type PointerInput } from '../pointer-index.ts';
 
 const connections: DatabaseConnection[] = [];
 const roots: string[] = [];
@@ -206,4 +206,40 @@ test('F. a missing DIFFERENT table whose name starts the same still rolls the st
   expect(rowCount(conn.sqlite, 'oracle_documents')).toBe(0);
   expect(rowCount(conn.sqlite, 'oracle_fts')).toBe(0);
   expect(rowCount(conn.sqlite, 'oracle_pointer_index')).toBe(pointersBefore);
+});
+
+test('G. only a genuinely absent table skips; every error while it exists rolls back', async () => {
+  // Skip path is decided by the catalog, not by error text: drop the real table and the writers
+  // no-op while documents still index — the fresh-DB-before-migration case, preserved.
+  const fresh = freshConn();
+  fresh.sqlite.run('DROP TABLE oracle_pointer_index');
+  await storeDocuments(fresh.sqlite, fresh.db, null, null, [
+    { id: 'fresh-1', type: 'learning', source_file: 'notes/fresh-1.md', concepts: ['Freshbucket'], content: 'fresh alpha beta', created_at: DATE, updated_at: DATE },
+  ], { tenantId: 'default' });
+  expect(rowCount(fresh.sqlite, 'oracle_documents')).toBe(1);
+  expect(queryPointerIndex(fresh.sqlite, { query: 'Freshbucket' })).toEqual([]);
+
+  // Reject path: the table exists, so a failure of ANY string shape propagates and rolls back.
+  // These are the identifiers the delimiter-allowlist regex leaked on across three rounds; they
+  // are now irrelevant because nothing parses the message.
+  const missingRefs = [
+    'oracle_pointer_index_shadow',   // word-char continuation
+    '"oracle_pointer_index-shadow"', // quoted hyphen
+    '"oracle_pointer_index shadow"', // quoted space
+    '"oracle_pointer_index "',       // quoted trailing space
+  ];
+  for (const [i, ref] of missingRefs.entries()) {
+    const conn = freshConn();
+    seedForeignPointers(conn.sqlite, 3);
+    conn.sqlite.run(`CREATE TRIGGER g_ref_${i} AFTER INSERT ON oracle_pointer_index BEGIN SELECT * FROM ${ref}; END`);
+    const before = rowCount(conn.sqlite, 'oracle_pointer_index');
+    await expect(
+      storeDocuments(conn.sqlite, conn.db, null, null, [
+        { id: `g-${i}`, type: 'learning', source_file: `notes/g-${i}.md`, concepts: ['Gbucket'], content: 'g alpha beta', created_at: DATE, updated_at: DATE },
+      ], { tenantId: 'default' }),
+    ).rejects.toThrow();
+    expect(rowCount(conn.sqlite, 'oracle_documents')).toBe(0);
+    expect(rowCount(conn.sqlite, 'oracle_fts')).toBe(0);
+    expect(rowCount(conn.sqlite, 'oracle_pointer_index')).toBe(before);
+  }
 });
