@@ -79,16 +79,14 @@ describe('verifyKnowledgeBase edge cases', () => {
     expect(result.orphaned).not.toContain('');
   });
 
-  test('check=false flags every DB row for one normalized orphan path', () => {
-    const result = verifyKnowledgeBase({ repoRoot, type: 'learning', check: false });
+  test('check=false without a root-proven scope is refused and mutates nothing (fail-closed)', () => {
+    // repoRoot is a temp dir: no project resolves → mutation must be refused.
+    expect(() => verifyKnowledgeBase({ repoRoot, type: 'learning', check: false }))
+      .toThrow('fail-closed');
+
     const rows = db.select({ id: oracleDocuments.id, supersededBy: oracleDocuments.supersededBy })
       .from(oracleDocuments)
       .all();
-    const superseded = Object.fromEntries(rows.map((row) => [row.id, row.supersededBy]));
-
-    expect(result.fixedOrphans).toBe(2);
-    expect(superseded[ids.orphanA]).toBe('_verified_orphan');
-    expect(superseded[ids.orphanB]).toBe('_verified_orphan');
-    expect(superseded[ids.blank]).toBeNull();
+    for (const row of rows) expect(row.supersededBy).toBeNull();
   });
 });
