@@ -8,11 +8,12 @@
  * "ambient" (legacy behavior, Class E — never auto-flagged); rows positively
  * owned by another project are excluded.
  *
- * Fail-closed rules (Riddler delta, round 2):
+ * Fail-closed rules (Riddler delta, rounds 2-3):
  * - An explicit project override that does not normalize is refused outright.
- * - Mutation (check:false) requires a root-proven scope: the repoRoot must
- *   resolve to a project, and any override must agree with it. Read-only runs
- *   may proceed unscoped (legacy report) or with an operator override.
+ * - Mutation (check:false) requires an EXPLICIT project that matches the
+ *   project detected from repoRoot. Omitted project refuses mutation exactly
+ *   like a mismatch (fail-closed until alias-resolution exists). Read-only
+ *   runs may proceed unscoped (legacy report) or with an operator override.
  */
 import { detectProject } from '../server/project-detect.ts';
 import { normalizeProject } from '../tools/learn-support.ts';
@@ -45,8 +46,9 @@ export type CallerScope = {
 /** Resolve the caller scope. Throws on an invalid explicit override. */
 export function resolveCallerScope(repoRoot: string, override?: string | null): CallerScope {
   const detected = detectProject(repoRoot);
+  const hasExplicit = override != null && override.trim() !== '';
   let project = detected;
-  if (override != null && override.trim() !== '') {
+  if (hasExplicit) {
     const normalized = normalizeProject(override);
     if (!normalized) {
       throw new Error(`oracle_verify: invalid project override '${override}' — refusing (fail-closed)`);
@@ -54,19 +56,19 @@ export function resolveCallerScope(repoRoot: string, override?: string | null): 
     project = normalized;
   }
   const variants = project ? projectVariants(project) : null;
+  const refused = (reason: string): CallerScope => ({
+    project, detected, variants, mutationAllowed: false, mutationRefusedReason: reason,
+  });
   if (!detected) {
-    return {
-      project, detected, variants,
-      mutationAllowed: false,
-      mutationRefusedReason: `repoRoot '${repoRoot}' does not resolve to a project — check:false refused (fail-closed)`,
-    };
+    return refused(`repoRoot '${repoRoot}' does not resolve to a project — check:false refused (fail-closed)`);
+  }
+  if (!hasExplicit) {
+    // Round 3: an omitted project must refuse mutation exactly like a
+    // mismatch — the caller has not proven it means THIS root's identity.
+    return refused(`check:false requires an explicit project matching the repoRoot's project '${detected}' — omitted (fail-closed until alias-resolution)`);
   }
   if (project !== detected) {
-    return {
-      project, detected, variants,
-      mutationAllowed: false,
-      mutationRefusedReason: `project override '${project}' does not match the repoRoot's project '${detected}' — check:false refused (fail-closed)`,
-    };
+    return refused(`project override '${project}' does not match the repoRoot's project '${detected}' — check:false refused (fail-closed)`);
   }
   return { project, detected, variants, mutationAllowed: true };
 }

@@ -92,10 +92,37 @@ test('POST check=false with a mismatching override is refused 400 and mutates no
   for (const row of rows) expect(row.supersededBy).toBeNull();
 });
 
+test('POST check=false with project OMITTED is refused 400 even on a canonical root (round 3)', async () => {
+  const res = await request('/api/verify', {
+    method: 'POST',
+    body: JSON.stringify({ check: false, type: 'learning' }),
+  });
+  const body = await res.json() as { error?: string };
+  expect(res.status).toBe(400);
+  expect(body.error).toContain('fail-closed');
+  const rows = db.select({ supersededBy: oracleDocuments.supersededBy }).from(oracleDocuments).all();
+  for (const row of rows) expect(row.supersededBy).toBeNull();
+});
+
 test('POST /api/verify with an invalid project is refused 400', async () => {
   const res = await request('/api/verify', {
     method: 'POST',
     body: JSON.stringify({ check: true, project: '///bogus///' }),
   });
   expect(res.status).toBe(400);
+});
+
+test('POST check=false WITH explicit matching project flags owned orphans (runs last)', async () => {
+  const res = await request('/api/verify', {
+    method: 'POST',
+    body: JSON.stringify({ check: false, type: 'learning', project: CALLER }),
+  });
+  const body = await res.json() as { fixed_orphans?: number };
+  expect(res.status).toBe(200);
+  expect(body.fixed_orphans).toBe(1);
+  const flagged = db.select({ id: oracleDocuments.id, supersededBy: oracleDocuments.supersededBy })
+    .from(oracleDocuments).all();
+  const byId = Object.fromEntries(flagged.map((row) => [row.id, row.supersededBy]));
+  expect(byId[`http-owned-orphan-${stamp}`]).toBe('_verified_orphan');
+  expect(byId[`http-foreign-${stamp}`]).toBeNull();
 });

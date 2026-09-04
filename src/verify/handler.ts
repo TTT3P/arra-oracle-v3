@@ -206,6 +206,7 @@ export function verifyKnowledgeBase(opts: {
       detected: scope.detected,
       scoped: callerVariants !== null,
       mutationAllowed: scope.mutationAllowed,
+      ...(scope.mutationRefusedReason ? { mutationRefusedReason: scope.mutationRefusedReason } : {}),
     },
     mismatches,
     recommendation,

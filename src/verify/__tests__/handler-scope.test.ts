@@ -92,7 +92,11 @@ describe('verifyKnowledgeBase caller-project scoping (P1, round 2)', () => {
   test('cross-project docs are excluded, never counted orphaned', () => {
     const result = verifyKnowledgeBase({ repoRoot });
 
-    expect(result.scope).toEqual({ project: CALLER, detected: CALLER, scoped: true, mutationAllowed: true });
+    expect(result.scope).toEqual({
+      project: CALLER, detected: CALLER, scoped: true,
+      mutationAllowed: false, // round 3: mutation additionally needs an EXPLICIT project
+      mutationRefusedReason: expect.stringContaining('omitted'),
+    });
     expect(result.orphaned).not.toContain(paths.foreign);
     expect(result.counts.foreignExcluded).toBe(1);
     expect(result.orphaned.sort()).toEqual([paths.ownedOrphan, paths.shortFormOrphan, paths.sharedPath].sort());
@@ -133,8 +137,13 @@ describe('verifyKnowledgeBase caller-project scoping (P1, round 2)', () => {
     expect(flaggedById()[`foreign-${stamp}`]).toBeNull();
   });
 
-  test('check:false flags ONLY project-proven ids — per-id NULL guard on shared paths', () => {
-    const result = verifyKnowledgeBase({ repoRoot, check: false });
+  test('OMITTED project + check:false is refused and mutates nothing (round 3)', () => {
+    expect(() => verifyKnowledgeBase({ repoRoot, check: false })).toThrow('fail-closed');
+    for (const value of Object.values(flaggedById())) expect(value).not.toBe('_verified_orphan');
+  });
+
+  test('check:false with explicit matching project flags ONLY project-proven ids — per-id NULL guard', () => {
+    const result = verifyKnowledgeBase({ repoRoot, project: CALLER, check: false });
     expect(result.unattributedOrphans).toEqual([paths.unattributed]);
     expect(result.orphaned).not.toContain(paths.unattributed);
 

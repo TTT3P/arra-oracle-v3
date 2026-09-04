@@ -23,8 +23,15 @@ export interface VerifyResult {
   dbNative: string[];
   /** How this run was scoped. project = effective scope (override wins);
    *  detected = project resolved from repoRoot; mutationAllowed = whether
-   *  check:false would be permitted under this scope. */
-  scope: { project: string | null; detected: string | null; scoped: boolean; mutationAllowed: boolean };
+   *  check:false would be permitted (requires an explicit project matching
+   *  detected); mutationRefusedReason explains a false mutationAllowed. */
+  scope: {
+    project: string | null;
+    detected: string | null;
+    scoped: boolean;
+    mutationAllowed: boolean;
+    mutationRefusedReason?: string;
+  };
   mismatches: VerifyMismatch[];
   recommendation: string;
   fixedOrphans?: number;
