@@ -102,35 +102,23 @@ test('GET /api/verify only reports DB-backed files for the active tenant', async
   }));
 });
 
-test('POST /api/verify check=false only flags orphaned docs in the active tenant', async () => {
+test('POST /api/verify check=false is refused when the repoRoot proves no project (fail-closed)', async () => {
+  // Even tenant-scoped mutation requires a root-proven project scope
+  // (Riddler round 2 #2): this repoRoot is a temp dir, so refuse with 400
+  // and flag nothing.
   const res = await tenantRequest(tenantB, '/api/verify', {
     method: 'POST',
     body: JSON.stringify({ check: false, type: 'learning' }),
   });
-  const body = await res.json() as {
-    orphaned: string[];
-    fixed_orphans?: number;
-    mismatches: Array<{ kind: string; sourceFile: string; ids?: string[] }>;
-  };
+  const body = await res.json() as { error?: string };
   const orphan = db.select({ supersededBy: oracleDocuments.supersededBy })
     .from(oracleDocuments)
     .where(eq(oracleDocuments.id, `verify-b-orphan-${stamp}`))
     .get();
-  const tenantAHealthy = db.select({ supersededBy: oracleDocuments.supersededBy })
-    .from(oracleDocuments)
-    .where(eq(oracleDocuments.id, `verify-a-${stamp}`))
-    .get();
 
-  expect(res.status).toBe(200);
-  expect(body.orphaned).toContain(paths.bOrphan);
-  expect(body.fixed_orphans).toBe(1);
-  expect(body.mismatches).toContainEqual(expect.objectContaining({
-    kind: 'orphaned',
-    sourceFile: paths.bOrphan,
-    ids: [`verify-b-orphan-${stamp}`],
-  }));
-  expect(orphan?.supersededBy).toBe('_verified_orphan');
-  expect(tenantAHealthy?.supersededBy).toBeNull();
+  expect(res.status).toBe(400);
+  expect(body.error).toContain('fail-closed');
+  expect(orphan?.supersededBy).toBeNull();
 });
 
 test('GET /api/verify skips broken symlinks and safely defaults invalid query filters', async () => {

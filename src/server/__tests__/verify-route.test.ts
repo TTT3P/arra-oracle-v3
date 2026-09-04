@@ -54,6 +54,8 @@ describe('GET/POST /api/verify', () => {
     expect(checkPayload.counts.orphaned).toBe(1);
     expect(checkPayload.orphaned).toContain('ψ/memory/learnings/missing.md');
 
+    // check:false without a root-proven scope AND an explicit matching
+    // project is refused fail-closed (P1 verify-scope contract, round 3).
     const fixResponse = await app.handle(new Request('http://localhost/api/verify', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -61,8 +63,11 @@ describe('GET/POST /api/verify', () => {
     }));
     const fixPayload = await fixResponse.json();
 
-    expect(fixResponse.status).toBe(200);
-    expect(fixPayload.fixed_orphans).toBe(1);
+    expect(fixResponse.status).toBe(400);
+    expect(fixPayload.error).toContain('fail-closed');
+    const orphanRow = db.select({ supersededBy: oracleDocuments.supersededBy })
+      .from(oracleDocuments).all();
+    for (const row of orphanRow) expect(row.supersededBy).toBeNull();
   });
 });
 

@@ -86,13 +86,16 @@ test('oracle_verify proxies through ORACLE_API without opening the MCP DB', asyn
     await client.connect(transport);
     const result = await client.callTool({
       name: 'oracle_verify',
-      arguments: { check: true, type: 'all' },
+      // project must survive the MCP→HTTP owner-proxy hop (Riddler round 2 #1)
+      arguments: { check: true, type: 'all', project: 'github.com/testowner/testrepo' },
     }) as { content?: Array<{ type: string; text: string }>; isError?: boolean };
 
     expect(result.isError).not.toBe(true);
     const payload = JSON.parse(result.content?.[0]?.text ?? '{}');
     expect(payload.counts).toBeDefined();
     expect(payload.counts.healthy).toBeNumber();
+    // proves the HTTP side actually received and applied the explicit project
+    expect(payload.scope?.project).toBe('github.com/testowner/testrepo');
     expect(stderr.join('')).not.toContain('ORACLE_API unavailable for oracle_verify');
     expect(existsSync(mcpDbPath)).toBe(false);
   } finally {

@@ -7,11 +7,13 @@ import type { OracleVerifyInput } from '../../tools/types.ts';
 const VerifyQuery = t.Object({
   check: t.Optional(t.String()),
   type: t.Optional(t.String()),
+  project: t.Optional(t.String()),
 });
 
 const VerifyBody = t.Object({
   check: t.Optional(t.Boolean()),
   type: t.Optional(t.String()),
+  project: t.Optional(t.String()),
 });
 
 function parseBoolean(value: string | undefined): boolean | undefined {
@@ -27,17 +29,19 @@ function parseType(value: string | undefined): OracleVerifyInput['type'] {
     : 'all';
 }
 
-function queryToInput(query: { check?: string; type?: string }): OracleVerifyInput {
+function queryToInput(query: { check?: string; type?: string; project?: string }): OracleVerifyInput {
   return {
     check: parseBoolean(query.check),
     type: parseType(query.type),
+    project: query.project,
   };
 }
 
-function bodyToInput(body: { check?: boolean; type?: string }): OracleVerifyInput {
+function bodyToInput(body: { check?: boolean; type?: string; project?: string }): OracleVerifyInput {
   return {
     check: body.check,
     type: parseType(body.type),
+    project: body.project,
   };
 }
 
@@ -45,8 +49,18 @@ function currentRepoRoot(): string {
   return process.env.ORACLE_REPO_ROOT || REPO_ROOT;
 }
 
+async function safeRun(input: OracleVerifyInput, set: { status?: number | string }) {
+  try {
+    return await runVerify(input, currentRepoRoot());
+  } catch (err) {
+    // fail-closed refusals (invalid override, unproven scope on check:false)
+    set.status = 400;
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 export const verifyRoutes = new Elysia({ prefix: '/api' })
-  .get('/verify', async ({ query }) => runVerify(queryToInput(query), currentRepoRoot()), {
+  .get('/verify', async ({ query, set }) => safeRun(queryToInput(query), set), {
     query: VerifyQuery,
     detail: {
       tags: ['search'],
@@ -54,7 +68,7 @@ export const verifyRoutes = new Elysia({ prefix: '/api' })
       summary: 'Verify knowledge base disk files against the DB index',
     },
   })
-  .post('/verify', async ({ body }) => runVerify(bodyToInput(body), currentRepoRoot()), {
+  .post('/verify', async ({ body, set }) => safeRun(bodyToInput(body), set), {
     body: VerifyBody,
     detail: {
       tags: ['search'],

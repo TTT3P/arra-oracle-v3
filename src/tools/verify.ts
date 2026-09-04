@@ -30,29 +30,37 @@ export const verifyToolDef = {
         description: 'Filter by document type (default: all)',
         enum: ['principle', 'pattern', 'learning', 'retro', 'all'],
         default: 'all'
+      },
+      project: {
+        type: 'string',
+        description: 'Explicit caller project (e.g. "github.com/owner/repo"). Default: detected from the seat repoRoot; rows owned by other projects are excluded either way.'
       }
     }
   }
 };
 
 export async function runVerify(input: OracleVerifyInput, repoRoot: string) {
-  const { check = true, type } = input;
+  const { check = true, type, project } = input;
 
   const verifyKnowledgeBase = await loadVerifyKnowledgeBase();
   const result = verifyKnowledgeBase({
     check,
     type,
     repoRoot,
+    project,
   });
 
   console.error(`[VERIFY] healthy=${result.counts.healthy} missing=${result.counts.missing} orphaned=${result.counts.orphaned} drifted=${result.counts.drifted}`);
 
   return {
     counts: result.counts,
+    scope: result.scope,
     missing: result.missing,
     orphaned: result.orphaned,
     drifted: result.drifted,
     untracked: result.untracked,
+    unattributed_orphans: result.unattributedOrphans,
+    db_native: result.dbNative,
     mismatches: result.mismatches,
     recommendation: result.recommendation,
     ...(result.fixedOrphans ? { fixed_orphans: result.fixedOrphans } : {}),
