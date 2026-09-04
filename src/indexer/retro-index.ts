@@ -21,8 +21,24 @@ import { parseRetroFile } from './parser.ts';
 import { storeDocuments } from './storage.ts';
 import { chunkDocumentsForIndexing } from './chunker.ts';
 import { supersedeReplacedSourceDocs } from './reindex-state.ts';
+import type { OracleDocument } from '../types.ts';
 
-export async function indexRetrospectives(repoRoot: string, dbPath: string = process.env.ORACLE_DB_PATH || DB_PATH) {
+/** Documents per store transaction. A whole-root retros pass over the canonical root is otherwise
+ * ONE giant `storeDocuments` transaction that holds the single Bun event loop for ~2 min and
+ * buffers the entire change set in memory — the slice-b live wedge (2026-09-05). Batching bounds
+ * both. Default sized from the proven per-file cost (RUNBOOK §4: retro-file 4–13 s); override with
+ * ORACLE_RETROS_BATCH_SIZE. */
+const DEFAULT_RETROS_BATCH_SIZE = 250;
+function retrosBatchSize(): number {
+  const n = Number(process.env.ORACLE_RETROS_BATCH_SIZE);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : DEFAULT_RETROS_BATCH_SIZE;
+}
+
+export async function indexRetrospectives(
+  repoRoot: string,
+  dbPath: string = process.env.ORACLE_DB_PATH || DB_PATH,
+  batchSize: number = retrosBatchSize(),
+) {
   const resolvedRoot = path.resolve(repoRoot);
   const seenContentHashes = new Set<string>();
   const documents = collectDocuments({
@@ -49,25 +65,34 @@ export async function indexRetrospectives(repoRoot: string, dbPath: string = pro
   // to 'default', so even an ambient-less CLI run stays tenant-scoped instead
   // of widening the supersede across every tenant sharing the source path.
   const tenantId = activeTenantId();
-  // The same chunking storeDocuments applies internally — reused here so the
-  // response can report the exact ids written (retro/learning docs commonly
-  // chunk into "<id>_1", "<id>_2__chunk_0", ... and there is no un-suffixed
-  // base row to read back by).
-  const chunked = chunkDocumentsForIndexing(documents);
+  const project = detectProject(resolvedRoot);
+  const size = Math.max(1, Math.trunc(batchSize));
+  // Chunk ids accumulate for the response and for one supersede pass at the end (batching supersede
+  // per batch would mis-fire when a source file's chunks straddle a batch boundary).
+  const chunked: OracleDocument[] = [];
+  let batches = 0;
   try {
-    await storeDocuments(sqlite, db, null, detectProject(resolvedRoot), documents, {
-      createdBy: 'retro_indexer',
-      tenantId,
-    });
-    // Upserting new deterministic ids leaves legacy active rows for the same
-    // source files behind, which duplicates search results. Supersede them
-    // through the owning replaced-source mechanism (never hard-delete).
+    for (let i = 0; i < documents.length; i += size) {
+      const batch = documents.slice(i, i + size);
+      // Each batch is its own storeDocuments transaction: a failure rolls back only this batch,
+      // earlier batches stay committed, and the upserts make a rerun idempotent (resumable). Its
+      // bulk pointer flush scans the tenant table once, so scans stay O(batches), not O(docs).
+      await storeDocuments(sqlite, db, null, project, batch, { createdBy: 'retro_indexer', tenantId });
+      for (const doc of chunkDocumentsForIndexing(batch)) chunked.push(doc);
+      batches += 1;
+      // Yield the event loop between batches. bun:sqlite is synchronous and never yields on its own,
+      // so without this the loop is blocked for the whole run and every HTTP/MCP handler wedges.
+      if (i + size < documents.length) await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    // Upserting new deterministic ids leaves legacy active rows for the same source files behind,
+    // which duplicates search results. Supersede them through the owning replaced-source mechanism
+    // (never hard-delete). One pass at the end keeps file-level grouping intact.
     supersedeReplacedSourceDocs(db, chunked, tenantId);
   } finally {
     sqlite.close();
   }
 
-  return { ok: true as const, repoRoot: resolvedRoot, documents: documents.length, ids: chunked.map((doc) => doc.id) };
+  return { ok: true as const, repoRoot: resolvedRoot, documents: documents.length, ids: chunked.map((doc) => doc.id), batches };
 }
 
 export async function indexRetroFile(repoRoot: string, filePath: string, dbPath: string = process.env.ORACLE_DB_PATH || DB_PATH) {
