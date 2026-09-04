@@ -119,7 +119,17 @@ launchd-managed process and must not be used as a restart path while launchd own
   A session that cannot list this tool is stale and must restart before claiming
   the retrospective complete. The HTTP calls below are operator surfaces, not
   substitutes for an agent missing its MCP tool.
-- Retros-only reindex (non-pruning, released; re-executed 2026-08-17):
+- ⚠️ **`scope=retros` on a large root is UNSAFE until the pointer-index fix (PR-B
+  slice b) ships** — incident ORACLE-REINDEX-HANDLER-JAM-2026-09-04: a retros
+  run over the canonical root (597 files / 4,961 docs) CPU-starved the core's
+  event loop for 35+ min (76% CPU, ZERO WAL writes — per-doc pointer-index
+  full-table scans), wedging every HTTP/MCP handler fleet-wide; contained by
+  `launchctl kickstart -k` with zero index loss (nothing had committed). Use
+  bounded `scope=retro-file` per file (4–13 s each, proven) for targeted
+  gaps; a full retros pass needs an operator watching liveness and a plan to
+  abort. Receipt: `oracle-maint-oracle/ψ/findings/2026-09-04_missing678-reindex-receipt.md`.
+- Retros-only reindex (non-pruning, released; re-executed 2026-08-17 — see the
+  hold above before running it over a large root):
   ```sh
   curl -s -X POST http://127.0.0.1:47778/api/v1/indexer/reindex \
     -H 'content-type: application/json' \
