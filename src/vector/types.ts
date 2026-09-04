@@ -10,7 +10,8 @@ export type EmbedType = 'query' | 'passage';
 export interface EmbeddingProvider {
   readonly name: string;
   readonly dimensions: number;
-  embed(texts: string[], type?: EmbedType): Promise<number[][]>;
+  /** signal is optional and advisory — providers that support it abort in-flight work. */
+  embed(texts: string[], type?: EmbedType, signal?: AbortSignal): Promise<number[][]>;
 }
 
 export type EmbedderBackend = 'none' | 'local' | 'remote' | 'ollama' | 'openai' | 'gemini' | 'cloudflare-ai';

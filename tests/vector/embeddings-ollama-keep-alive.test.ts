@@ -17,7 +17,7 @@ async function capturedBody(): Promise<Record<string, unknown>> {
   let body: Record<string, unknown> = {};
   const target = startServer(async (req) => {
     body = (await req.json()) as Record<string, unknown>;
-    return Response.json({ embeddings: [[1, 2, 3]] });
+    return Response.json({ embeddings: [Array.from({ length: 1024 }, () => 0.1)] });
   });
   const provider = new OllamaEmbeddings({ baseUrl: target, model: 'bge-m3' });
   await provider.embed(['hello'], 'query');

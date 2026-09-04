@@ -8,6 +8,7 @@ const originalBatchSize = process.env.ORACLE_EMBED_BATCH_SIZE;
 const originalTimeout = process.env.ORACLE_EMBED_TIMEOUT_MS;
 const originalOllamaBaseUrl = process.env.OLLAMA_BASE_URL;
 const originalOllamaHost = process.env.OLLAMA_HOST;
+const originalKeepAlive = process.env.ORACLE_EMBED_KEEP_ALIVE;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -23,6 +24,8 @@ afterEach(() => {
   else process.env.OLLAMA_BASE_URL = originalOllamaBaseUrl;
   if (originalOllamaHost === undefined) delete process.env.OLLAMA_HOST;
   else process.env.OLLAMA_HOST = originalOllamaHost;
+  if (originalKeepAlive === undefined) delete process.env.ORACLE_EMBED_KEEP_ALIVE;
+  else process.env.ORACLE_EMBED_KEEP_ALIVE = originalKeepAlive;
 });
 
 describe('OllamaEmbeddings retry diagnostics (#987)', () => {
@@ -38,7 +41,7 @@ describe('OllamaEmbeddings retry diagnostics (#987)', () => {
       return Response.json({ embeddings: [[1, 2, 3, 4]] });
     }) as typeof fetch;
 
-    const embedder = new OllamaEmbeddings({ model: 'bge-m3' });
+    const embedder = new OllamaEmbeddings({ model: 'bge-test' });
     const vectors = await embedder.embed(['hello'], 'passage');
 
     expect(calls).toBe(2);
@@ -48,6 +51,7 @@ describe('OllamaEmbeddings retry diagnostics (#987)', () => {
 
   it('batches inputs through Ollama /api/embed', async () => {
     process.env.ORACLE_EMBED_BATCH_SIZE = '2';
+    delete process.env.ORACLE_EMBED_KEEP_ALIVE;
     const requests: unknown[] = [];
     globalThis.fetch = (async (_url, init) => {
       requests.push(JSON.parse(String(init?.body)));
@@ -55,13 +59,14 @@ describe('OllamaEmbeddings retry diagnostics (#987)', () => {
       return Response.json({ embeddings: input.map((_, i) => [i, i + 1]) });
     }) as typeof fetch;
 
-    const embedder = new OllamaEmbeddings({ model: 'bge-m3' });
+    const embedder = new OllamaEmbeddings({ model: 'bge-test' });
     const vectors = await embedder.embed(['a', 'b', 'c'], 'passage');
 
     expect(vectors).toEqual([[0, 1], [1, 2], [0, 1]]);
+    // keep_alive: -1 pins the model in Ollama (PR #8, 3cc961a4)
     expect(requests).toEqual([
-      { model: 'bge-m3', input: ['passage: a', 'passage: b'] },
-      { model: 'bge-m3', input: ['passage: c'] },
+      { model: 'bge-test', input: ['passage: a', 'passage: b'], keep_alive: -1 },
+      { model: 'bge-test', input: ['passage: c'], keep_alive: -1 },
     ]);
     expect(embedder.dimensions).toBe(2);
   });
@@ -75,7 +80,7 @@ describe('OllamaEmbeddings retry diagnostics (#987)', () => {
       return Response.json({ embeddings: [[1, 2, 3]] });
     }) as typeof fetch;
 
-    const embedder = new OllamaEmbeddings({ model: 'bge-m3' });
+    const embedder = new OllamaEmbeddings({ model: 'bge-test' });
     await embedder.embed(['hello'], 'passage');
 
     expect(requested).toBe('http://ollama.internal:11434/api/embed');
@@ -91,7 +96,7 @@ describe('OllamaEmbeddings retry diagnostics (#987)', () => {
       return Response.json({ embeddings: [[1]] });
     }) as typeof fetch;
 
-    const embedder = new OllamaEmbeddings({ model: 'bge-m3' });
+    const embedder = new OllamaEmbeddings({ model: 'bge-test' });
     await expect(embedder.embed(['hello'], 'passage')).rejects.toThrow('failed after 1 attempts: aborted');
   });
 
@@ -102,7 +107,7 @@ describe('OllamaEmbeddings retry diagnostics (#987)', () => {
       throw new Error('socket reset');
     }) as typeof fetch;
 
-    const embedder = new OllamaEmbeddings({ model: 'bge-m3' });
+    const embedder = new OllamaEmbeddings({ model: 'bge-test' });
 
     await expect(embedder.embed(['hello'], 'passage')).rejects.toThrow('failed after 2 attempts: socket reset');
   });

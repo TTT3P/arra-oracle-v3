@@ -6,7 +6,7 @@ test('ollama embedder truncates very long prompts before embedding', async () =>
   let prompt = '';
   const target = startServer(async (req) => {
     prompt = ((await req.json()) as any).input[0];
-    return Response.json({ embedding: [1] });
+    return Response.json({ embedding: Array.from({ length: 768 }, () => 0.1) });
   });
   const provider = new OllamaEmbeddings({ baseUrl: target, model: 'nomic-embed-text' });
 
