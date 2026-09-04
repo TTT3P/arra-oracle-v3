@@ -5,6 +5,7 @@ import { createOllamaEmbedderWithUrlFallback, resolveOllamaFallbackUrls } from '
 const ENV_KEYS = [
   'OLLAMA_BASE_URL', 'OLLAMA_HOST', 'OLLAMA_FALLBACK_BASE_URLS',
   'ORACLE_EMBED_ATTEMPTS', 'ORACLE_EMBED_RETRY_DELAY_MS', 'ORACLE_EMBED_COOLDOWN_MS',
+  'ORACLE_EMBED_COMPAT_TTL_MS',
 ] as const;
 const saved = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
 const originalFetch = globalThis.fetch;
@@ -24,7 +25,10 @@ afterEach(() => {
 
 const DIM = 1024; // bge-m3 declared dims — mocks must be dimension-honest
 const DIGEST = 'sha256:primary-weights';
-type FleetState = { primaryUp: boolean; backupDigest?: string; backupDim?: number; calls: string[] };
+type FleetState = {
+  primaryUp: boolean; primaryDigest?: string; primaryEmbedFails?: boolean;
+  backupDigest?: string; backupDim?: number; calls: string[];
+};
 
 /** Mock BOTH endpoints' /api/tags (digest gate) and /api/embed. */
 function mockFleet(state: FleetState): void {
@@ -34,8 +38,11 @@ function mockFleet(state: FleetState): void {
     const isPrimary = u.startsWith('http://primary:1');
     if (isPrimary && !state.primaryUp) throw new Error('ECONNREFUSED');
     if (u.includes('/api/tags')) {
-      const digest = isPrimary ? DIGEST : (state.backupDigest ?? DIGEST);
+      const digest = isPrimary ? (state.primaryDigest ?? DIGEST) : (state.backupDigest ?? DIGEST);
       return Response.json({ models: [{ name: 'bge-m3:latest', digest }] });
+    }
+    if (isPrimary && state.primaryEmbedFails) {
+      return new Response('primary embed broken', { status: 500 });
     }
     const { input } = JSON.parse(String(init?.body)) as { input: string[] };
     const dim = isPrimary ? DIM : (state.backupDim ?? DIM);
@@ -49,6 +56,7 @@ function chainEnv(): void {
   process.env.ORACLE_EMBED_ATTEMPTS = '1';
   process.env.ORACLE_EMBED_RETRY_DELAY_MS = '1';
   process.env.ORACLE_EMBED_COOLDOWN_MS = '60000';
+  process.env.ORACLE_EMBED_COMPAT_TTL_MS = '0'; // re-verify the proof on every fallback entry
   delete process.env.OLLAMA_HOST;
 }
 
@@ -134,6 +142,49 @@ describe('createOllamaEmbedderWithUrlFallback (TINE 2026-08-31 fallback chain)',
     state.primaryUp = false;
 
     await expect(embedder.embed(['hello'], 'passage')).rejects.toThrow('dimension guard');
+  });
+
+  it('REFUSES a fallback whose digest DRIFTS after a successful verification (round 3)', async () => {
+    chainEnv();
+    const state: FleetState = { primaryUp: true, calls: [] };
+    mockFleet(state);
+    console.info = () => undefined;
+    console.warn = () => undefined;
+
+    const embedder = createOllamaEmbedderWithUrlFallback({ model: 'bge-m3' });
+    await settle();
+    state.primaryUp = false;
+
+    const first = await embedder.embed(['a'], 'passage'); // verified D1 → accepted
+    expect(first[0]).toHaveLength(DIM);
+    const backupEmbedsBefore = state.calls.filter((u) => u.startsWith('http://backup:2') && u.includes('/api/embed')).length;
+    expect(backupEmbedsBefore).toBe(1);
+
+    state.backupDigest = 'sha256:drifted-weights'; // fallback repulled different weights
+    await expect(embedder.embed(['b'], 'passage')).rejects.toThrow('DIFFERENT');
+    const backupEmbedsAfter = state.calls.filter((u) => u.startsWith('http://backup:2') && u.includes('/api/embed')).length;
+    expect(backupEmbedsAfter).toBe(backupEmbedsBefore); // acceptedAfterDigestDrift: false
+  });
+
+  it('PRIMARY digest change re-baselines the anchor and invalidates the fallback proof (round 3)', async () => {
+    chainEnv();
+    const state: FleetState = { primaryUp: true, primaryEmbedFails: true, calls: [] };
+    mockFleet(state);
+    console.info = () => undefined;
+    const warnLines: string[] = [];
+    console.warn = (...args: unknown[]) => { warnLines.push(args.join(' ')); };
+
+    const embedder = createOllamaEmbedderWithUrlFallback({ model: 'bge-m3' });
+    await settle();
+
+    const first = await embedder.embed(['a'], 'passage'); // primary embed 500 → verified fallback serves
+    expect(first[0]).toHaveLength(DIM);
+
+    state.primaryDigest = 'sha256:new-primary-weights'; // primary now serves different weights
+    await expect(embedder.embed(['b'], 'passage')).rejects.toThrow('DIFFERENT');
+    expect(warnLines.join('\n')).toContain('re-baselining');
+    const backupEmbeds = state.calls.filter((u) => u.startsWith('http://backup:2') && u.includes('/api/embed')).length;
+    expect(backupEmbeds).toBe(1); // only the pre-drift embed
   });
 
   it('returns a plain single-endpoint embedder when no fallback URLs are set', () => {
