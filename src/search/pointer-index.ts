@@ -219,7 +219,10 @@ function adjacent(words: string[]): string[] { return words.slice(0, -1).map((wo
 // storeDocuments commit that partial pointer state. Require the SQLite no-such-table phrasing so
 // every other error propagates and rolls the transaction back.
 function missingPointerTable(error: unknown): boolean {
-  return /no such table:\s*(?:[A-Za-z0-9_]+\.)?"?oracle_pointer_index"?/i.test(
+  // The name must END here: the trailing lookahead rejects a longer identifier that merely starts
+  // with it (e.g. "no such table: oracle_pointer_index_shadow" — a different, missing table). \b
+  // would not help since it treats "_" as a word char; the explicit class excludes it.
+  return /no such table:\s*(?:[A-Za-z0-9_]+\.)?"?oracle_pointer_index"?(?![A-Za-z0-9_])/i.test(
     String(error instanceof Error ? error.message : error),
   );
 }

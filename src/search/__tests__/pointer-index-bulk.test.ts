@@ -182,3 +182,28 @@ test('E. a document id repeated in one batch is last-write-wins, identical to th
   expect(dumpPointers(bulk.sqlite)).not.toContain('alpha-bucket');
   expect(dumpPointers(bulk.sqlite)).toContain('beta-bucket');
 });
+
+test('F. a missing DIFFERENT table whose name starts the same still rolls the store back', async () => {
+  const conn = freshConn();
+  seedForeignPointers(conn.sqlite, 5);
+  // Trigger references a different, non-existent table whose name merely starts with the real one.
+  // bun:sqlite reports "no such table: main.oracle_pointer_index_shadow" — a genuine missing table,
+  // but NOT ours. Without a terminal boundary the predicate matched the prefix and swallowed it,
+  // committing documents against a pointer index the trigger had aborted.
+  conn.sqlite.run(
+    'CREATE TRIGGER canary_shadow AFTER INSERT ON oracle_pointer_index ' +
+    'BEGIN SELECT * FROM oracle_pointer_index_shadow; END',
+  );
+  const documents = [
+    { id: 'shadow-1', type: 'learning', source_file: 'notes/shadow-1.md', concepts: ['Shadowbucket'], content: 'shadow alpha beta', created_at: DATE, updated_at: DATE },
+  ];
+  const pointersBefore = rowCount(conn.sqlite, 'oracle_pointer_index');
+
+  await expect(
+    storeDocuments(conn.sqlite, conn.db, null, null, documents, { tenantId: 'default' }),
+  ).rejects.toThrow(/oracle_pointer_index_shadow/);
+
+  expect(rowCount(conn.sqlite, 'oracle_documents')).toBe(0);
+  expect(rowCount(conn.sqlite, 'oracle_fts')).toBe(0);
+  expect(rowCount(conn.sqlite, 'oracle_pointer_index')).toBe(pointersBefore);
+});
