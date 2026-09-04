@@ -12,7 +12,7 @@ import { enrichTextWithAcronyms } from '../search/acronyms.ts';
 import { tenantIdForWrite } from '../middleware/tenant.ts';
 import { replaceEntityLinks } from '../search/entity-ranking.ts';
 import { chunkDocumentsForIndexing } from './chunker.ts';
-import { replaceDocumentPointers } from '../search/pointer-index.ts';
+import { replaceDocumentPointersBulk, type PointerInput } from '../search/pointer-index.ts';
 import type { VectorStoreAdapter } from '../vector/types.ts';
 import type { OracleDocument } from '../types.ts';
 
@@ -42,6 +42,10 @@ export async function storeDocuments(
   const ids: string[] = [];
   const contents: string[] = [];
   const metadatas: any[] = [];
+  // Pointer writes are collected and flushed once per batch: per-document replacement re-scans
+  // the whole tenant pointer table each time, which is quadratic over a large-root reindex and
+  // was the store-phase wedge behind the PR#5 / ORACLE-REINDEX-HANDLER-JAM incidents.
+  const pointerInputs: PointerInput[] = [];
 
   db.transaction((tx) => {
     for (const doc of storedDocuments) {
@@ -110,7 +114,7 @@ export async function storeDocuments(
         concepts: doc.concepts,
         now,
       });
-      replaceDocumentPointers(sqlite, {
+      pointerInputs.push({
         documentId: doc.id,
         tenantId,
         content: indexedContent,
@@ -131,6 +135,8 @@ export async function storeDocuments(
         ...(doc.line_end !== undefined && { line_end: doc.line_end }),
       });
     }
+    // Flush all pointer memberships in a single tenant scan (see pointerInputs comment above).
+    replaceDocumentPointersBulk(sqlite, tenantId, pointerInputs);
   });
 
   // Batch insert to vector store in chunks of 100 (skip if no client)

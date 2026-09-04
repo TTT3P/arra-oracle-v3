@@ -46,21 +46,58 @@ export function documentPointers(input: PointerInput): Pointer[] {
 }
 
 export function replaceDocumentPointers(dbInput: OracleDbInput, input: PointerInput): void {
+  // The incremental single-document path is exactly the one-element batch.
+  replaceDocumentPointersBulk(dbInput, input.tenantId, [input]);
+}
+
+/**
+ * Replace pointers for a whole store batch in one tenant scan.
+ *
+ * `removeDocumentPointers` reads *every* pointer row for the tenant — there is no reverse
+ * doc→pointer index; `doc_ids` is a forward-only JSON array. Calling it per document (as the old
+ * `replaceDocumentPointers` did, once per doc inside `storeDocuments`) is O(pointer_rows ×
+ * documents): the store phase that wedged the single Bun loop in the PR#5 (2026-08-29) and
+ * ORACLE-REINDEX-HANDLER-JAM (2026-09-04) incidents — ~12.5k rows re-scanned and JSON-parsed for
+ * each of ~5k docs, all inside one transaction that never yields, so the WAL commit never lands.
+ *
+ * Here the tenant scan runs ONCE for the batch, then new memberships are accumulated in memory and
+ * written one upsert per touched pointer key (indexed primary key) — O(pointer_rows + Σpointers).
+ * The final state is identical to running the per-document path in sequence: every batch document
+ * is removed from the rows it no longer belongs to, then added back only to its own keys. The
+ * accumulator mirrors `workers/pointer-backfill.ts`, which avoids the same quadratic for the
+ * whole-corpus backfill. All inputs are assumed to share `tenantId`, which every `storeDocuments`
+ * call guarantees.
+ */
+export function replaceDocumentPointersBulk(
+  dbInput: OracleDbInput,
+  tenantId: string | undefined,
+  inputs: PointerInput[],
+): void {
+  if (inputs.length === 0) return;
   try {
     const db = toDb(dbInput);
-    const tenantId = input.tenantId?.trim() || 'default';
-    removeDocumentPointers(db, tenantId, [input.documentId]);
+    const tenant = tenantId?.trim() || 'default';
+    // One scan removes every re-indexed document from its stale pointer rows.
+    removeDocumentPointers(db, tenant, inputs.map((input) => input.documentId));
+    // Accumulate the fresh memberships so each pointer key is written exactly once.
+    const accumulated = new Map<string, { kind: PointerKind; key: string; docIds: Set<string> }>();
+    for (const input of inputs) {
+      for (const item of documentPointers(input)) {
+        const id = pointerId(tenant, item.kind, item.key);
+        const entry = accumulated.get(id);
+        if (entry) entry.docIds.add(input.documentId);
+        else accumulated.set(id, { kind: item.kind, key: item.key, docIds: new Set([input.documentId]) });
+      }
+    }
     const now = Date.now();
-    for (const item of documentPointers(input)) {
-      const id = pointerId(tenantId, item.kind, item.key);
+    for (const [id, entry] of accumulated) {
       const existingRow = db.select({ docIds: schema.oraclePointerIndex.docIds })
         .from(schema.oraclePointerIndex)
         .where(eq(schema.oraclePointerIndex.id, id))
         .get();
-      const existing = parseIds(existingRow?.docIds);
-      const docIds = [...new Set([...existing, input.documentId])].sort();
+      const docIds = [...new Set([...parseIds(existingRow?.docIds), ...entry.docIds])].sort();
       db.insert(schema.oraclePointerIndex)
-        .values({ id, tenantId, kind: item.kind, key: item.key, docIds: JSON.stringify(docIds), updatedAt: now })
+        .values({ id, tenantId: tenant, kind: entry.kind, key: entry.key, docIds: JSON.stringify(docIds), updatedAt: now })
         .onConflictDoUpdate({
           target: schema.oraclePointerIndex.id,
           set: { docIds: JSON.stringify(docIds), updatedAt: now },
