@@ -77,11 +77,20 @@ export function replaceDocumentPointersBulk(
   try {
     const db = toDb(dbInput);
     const tenant = tenantId?.trim() || 'default';
+    // A document id repeated within one batch is last-write-wins — exactly what running the
+    // per-document path in sequence leaves behind (the later write removes the id from every row,
+    // then re-adds only its own keys). Collapse to the last input per id BEFORE removal and
+    // accumulation; otherwise the id would be UNIONed across both inputs' keys while the
+    // documents / FTS / entity rows storeDocuments writes keep only the last, leaving the indexes
+    // inconsistent.
+    const lastByDoc = new Map<string, PointerInput>();
+    for (const input of inputs) lastByDoc.set(input.documentId, input);
+    const effective = [...lastByDoc.values()];
     // One scan removes every re-indexed document from its stale pointer rows.
-    removeDocumentPointers(db, tenant, inputs.map((input) => input.documentId));
+    removeDocumentPointers(db, tenant, effective.map((input) => input.documentId));
     // Accumulate the fresh memberships so each pointer key is written exactly once.
     const accumulated = new Map<string, { kind: PointerKind; key: string; docIds: Set<string> }>();
-    for (const input of inputs) {
+    for (const input of effective) {
       for (const item of documentPointers(input)) {
         const id = pointerId(tenant, item.kind, item.key);
         const entry = accumulated.get(id);
@@ -204,4 +213,13 @@ function uniquePointers(items: Pointer[]): Pointer[] {
 }
 function adjacent(words: string[]): string[] { return words.slice(0, -1).map((word, i) => `${word} ${words[i + 1]}`); }
 
-function missingPointerTable(error: unknown): boolean { return String(error instanceof Error ? error.message : error).includes('oracle_pointer_index'); }
+// Only a genuine "table does not exist" is a legitimate skip (fresh DB before migration). Matching
+// any message that merely contains the table name would swallow a constraint or trigger failure
+// mid-batch — after removal has already cleared memberships and some keys were re-upserted — and let
+// storeDocuments commit that partial pointer state. Require the SQLite no-such-table phrasing so
+// every other error propagates and rolls the transaction back.
+function missingPointerTable(error: unknown): boolean {
+  return /no such table:\s*(?:[A-Za-z0-9_]+\.)?"?oracle_pointer_index"?/i.test(
+    String(error instanceof Error ? error.message : error),
+  );
+}

@@ -71,6 +71,9 @@ function dumpPointers(sqlite: Database): string {
     .join('\n');
 }
 
+const rowCount = (sqlite: Database, table: string): number =>
+  (sqlite.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+
 const isTenantScan = (sql: string): boolean =>
   /oracle_pointer_index/i.test(sql) && /"tenant_id" = \?/.test(sql) && !/"id" = \?/.test(sql);
 
@@ -133,4 +136,49 @@ test('C. bulk replace is an order of magnitude faster than per-document on a pop
   // Guard against comparing noise, then assert the linear path clears the quadratic by 10x.
   expect(naiveMs).toBeGreaterThan(20);
   expect(bulkMs * 10).toBeLessThan(naiveMs);
+});
+
+test('D. a non-missing-table pointer failure rolls the whole store back, never a partial commit', async () => {
+  const conn = freshConn();
+  seedForeignPointers(conn.sqlite, 5);
+  // Stands in for a constraint/trigger failure whose message names the table but is NOT
+  // "no such table" — the class the include-based predicate silently swallowed, letting
+  // storeDocuments commit documents against a half-rewritten pointer index.
+  conn.sqlite.run(
+    "CREATE TRIGGER canary_poison BEFORE INSERT ON oracle_pointer_index WHEN NEW.key LIKE '%poison%' " +
+    "BEGIN SELECT RAISE(ABORT, 'poison write blocked on oracle_pointer_index'); END",
+  );
+  const documents = [
+    { id: 'keep-1', type: 'learning', source_file: 'notes/keep-1.md', concepts: ['Safebucket'], content: 'safe alpha beta', created_at: DATE, updated_at: DATE },
+    { id: 'poison-1', type: 'learning', source_file: 'notes/poison-1.md', concepts: ['Poison marker'], content: 'poison gamma delta', created_at: DATE, updated_at: DATE },
+  ];
+  const pointersBefore = rowCount(conn.sqlite, 'oracle_pointer_index');
+
+  await expect(
+    storeDocuments(conn.sqlite, conn.db, null, null, documents, { tenantId: 'default' }),
+  ).rejects.toThrow(/poison/);
+
+  // keep-1 was accumulated before poison-1, so at least one pointer key upserted before the abort —
+  // yet nothing survives: documents, FTS and pointer rows all rolled back with the propagated error.
+  expect(rowCount(conn.sqlite, 'oracle_documents')).toBe(0);
+  expect(rowCount(conn.sqlite, 'oracle_fts')).toBe(0);
+  expect(rowCount(conn.sqlite, 'oracle_pointer_index')).toBe(pointersBefore);
+});
+
+test('E. a document id repeated in one batch is last-write-wins, identical to the per-document path', () => {
+  const naive = freshConn();
+  const bulk = freshConn();
+  seedForeignPointers(naive.sqlite, 10);
+  seedForeignPointers(bulk.sqlite, 10);
+  const first: PointerInput = { documentId: 'dup-1', tenantId: 'default', content: 'alpha bucket note', concepts: ['Alpha Bucket'], timestamp: DATE };
+  const second: PointerInput = { documentId: 'dup-1', tenantId: 'default', content: 'beta bucket note', concepts: ['Beta Bucket'], timestamp: DATE };
+
+  replaceDocumentPointers(naive.sqlite, first);
+  replaceDocumentPointers(naive.sqlite, second);
+  replaceDocumentPointersBulk(bulk.sqlite, 'default', [first, second]);
+
+  expect(dumpPointers(bulk.sqlite)).toEqual(dumpPointers(naive.sqlite));
+  // The later write wins outright — the first input's unique key is gone, not UNIONed in.
+  expect(dumpPointers(bulk.sqlite)).not.toContain('alpha-bucket');
+  expect(dumpPointers(bulk.sqlite)).toContain('beta-bucket');
 });
