@@ -37,6 +37,25 @@ import { setIndexingStatus } from './status.ts';
 import { storeDocuments } from './storage.ts';
 
 export const LEARNINGS_SUBDIR = path.join('ψ', 'memory', 'learnings');
+const LEARNINGS_PREFIX = 'ψ/memory/learnings/';
+
+const isWithin = (root: string, target: string): boolean => target === root || target.startsWith(root + path.sep);
+
+/**
+ * Fail closed on any symlink inside the learnings tree (Riddler PR#21 #1): the
+ * collector follows directory symlinks and reads through file symlinks, so a
+ * link would let a validated root read — and later store — content from
+ * outside it while the relative source path hides the escape.
+ */
+function assertSymlinkFreeTree(realRoot: string, dir: string): void {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isSymbolicLink()) {
+      throw new Error(`Refusing scope=learnings: symlink inside the learnings tree (${path.relative(realRoot, full)})`);
+    }
+    if (entry.isDirectory()) assertSymlinkFreeTree(realRoot, full);
+  }
+}
 
 export interface LearningsPassOptions {
   /** Collect and report candidates only; write nothing (no status row, no store). */
@@ -54,6 +73,8 @@ export interface LearningsPassResult {
   chunks: number;
   superseded: number;
   vectorJobs: VectorQueueStats;
+  /** Learning documents found under project-first/crew ψ dirs inside the root and NOT stored (outside this scope). */
+  skippedOutsideTree: number;
   /** Present on dry runs only: the relative source files that would be stored. */
   sourceFiles?: string[];
 }
@@ -91,6 +112,12 @@ export function validateLearningsRoot(repoRoot: string | null | undefined): stri
     throw new Error(`Refusing scope=learnings: ${learningsDir} does not exist`);
   }
   const real = realpathOrNull(resolved);
+  if (!real) throw new Error(`Refusing scope=learnings: cannot resolve ${resolved}`);
+  const realLearnings = realpathOrNull(learningsDir);
+  if (!realLearnings || !isWithin(real, realLearnings)) {
+    throw new Error(`Refusing scope=learnings: ${learningsDir} resolves outside the root`);
+  }
+  assertSymlinkFreeTree(real, realLearnings);
   // Env wins at call time (config.ts freezes ORACLE_DATA_DIR at import; tests and launchers set the env).
   const dataDir = realpathOrNull(process.env.ORACLE_DATA_DIR?.trim() || ORACLE_DATA_DIR);
   if (real && dataDir && real === dataDir) {
@@ -100,7 +127,31 @@ export function validateLearningsRoot(repoRoot: string | null | undefined): stri
   if (boundRoot && real !== realpathOrNull(boundRoot)) {
     throw new Error(`Refusing scope=learnings: repoRoot is outside this seat's bound memory owner (ORACLE_MEMORY_OWNER_ROOT=${boundRoot})`);
   }
-  return resolved;
+  return real;
+}
+
+export interface LearningsCandidates {
+  documents: OracleDocument[];
+  chunks: OracleDocument[];
+  sourceFiles: string[];
+  /** Documents the collector found under project-first/crew ψ dirs inside the root — not part of this scope. */
+  skippedOutsideTree: number;
+}
+
+/**
+ * Pure collection for `scope=learnings`: one collector call, one subdir, and
+ * only documents whose source path is inside `ψ/memory/learnings/` of the root
+ * (the shared collector also walks project-first `github.com/…/ψ` and crew
+ * dirs under the root — those are dropped and counted). No database is
+ * opened; this is what a dry run returns.
+ */
+export function collectLearningsCandidates(config: IndexerConfig, seen: Set<string> = new Set()): LearningsCandidates {
+  seen.clear();
+  const found = collectDocuments({ config, seenContentHashes: seen, subdir: 'learnings', parseFn: parseLearningFile, label: 'learning' });
+  const documents = found.filter((doc) => doc.source_file.startsWith(LEARNINGS_PREFIX));
+  const chunks = chunkDocumentsForIndexing(documents);
+  const sourceFiles = [...new Set(documents.map((doc) => doc.source_file))].sort();
+  return { documents, chunks, sourceFiles, skippedOutsideTree: found.length - documents.length };
 }
 
 const NO_VECTOR_JOBS: VectorQueueStats = { queued: 0, skipped: 0, failed: 0 };
@@ -116,19 +167,8 @@ function safeEnqueue(db: LearningsPassContext['db'], documents: OracleDocument[]
 export async function runLearningsPass(ctx: LearningsPassContext, options: LearningsPassOptions = {}): Promise<LearningsPassResult> {
   const dryRun = options.dryRun === true;
   const tenantId = activeTenantId();
-  ctx.seenContentHashes.clear();
-
-  // Exactly one collector call, exactly one subdir. No resonance, retrospectives,
-  // distillations, ψ/learn, inbox or security corpus — by construction.
-  const documents = collectDocuments({
-    config: ctx.config,
-    seenContentHashes: ctx.seenContentHashes,
-    subdir: 'learnings',
-    parseFn: parseLearningFile,
-    label: 'learning',
-  });
-  const indexDocuments = chunkDocumentsForIndexing(documents);
-  const sourceFiles = [...new Set(documents.map((doc) => doc.source_file))].sort();
+  // Exactly one collector call, exactly one subdir, contained to ψ/memory/learnings of the root.
+  const { documents, chunks: indexDocuments, sourceFiles, skippedOutsideTree } = collectLearningsCandidates(ctx.config, ctx.seenContentHashes);
   const base = {
     ok: true as const,
     scope: 'learnings' as const,
@@ -137,6 +177,7 @@ export async function runLearningsPass(ctx: LearningsPassContext, options: Learn
     files: sourceFiles.length,
     documents: documents.length,
     chunks: indexDocuments.length,
+    skippedOutsideTree,
   };
 
   if (dryRun) return { ...base, superseded: 0, vectorJobs: NO_VECTOR_JOBS, sourceFiles };

@@ -48,6 +48,12 @@ export function createReindexRoute(overrides: Partial<ReindexDeps> = {}) {
     const activeJob = activeJobs.get(jobKey) ?? null;
     const origin: Record<string, unknown> = { ...reindexOrigin(request), scope, wait, append, tenant: jobKey };
 
+    if (dryRun && scope !== 'learnings') {
+      // Never let a dry-run request fall through to a mutating runner (Riddler PR#21 #3).
+      set.status = 400;
+      return { ok: false, error: 'dryRun is only supported with scope=learnings' };
+    }
+
     if (activeJob) {
       log(reindexLogLine('refused', { ...origin, activeJob: activeJob.id, activeSince: activeJob.startedAt }));
       set.status = 409;

@@ -233,4 +233,22 @@ describe('POST /indexer/reindex', () => {
     expect(runFull).not.toHaveBeenCalled();
     expect(runRetros).not.toHaveBeenCalled();
   });
+  it('rejects dryRun for any scope other than learnings before running anything', async () => {
+    const runFull = mock(async () => ({ ok: true as const, repoRoot: '/oracle', append: false }));
+    const runRetros = mock(async (repoRoot: string) => ({ ok: true as const, repoRoot, documents: 0 }));
+    const runRetroFile = mock(async (repoRoot: string, filePath: string) => ({ ok: true as const, repoRoot, filePath, documents: 0 }));
+    const runLearnings = mock(async ({ repoRoot }: { repoRoot: string }) => ({ ok: true as const, repoRoot }));
+    const log = mock((_line: string) => {});
+    const app = new Elysia().use(createReindexRoute({ resolveRepoRoot: () => '/oracle', runFull, runRetros, runRetroFile, runLearnings, log }));
+    for (const body of [{ dryRun: true }, { scope: 'all', dryRun: true }, { scope: 'retros', dryRun: true }, { scope: 'retro-file', filePath: '/oracle/ψ/memory/retrospectives/x.md', dryRun: true }]) {
+      const res = await post(app, body);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as any).error).toContain('dryRun is only supported with scope=learnings');
+    }
+    expect(runFull).not.toHaveBeenCalled();
+    expect(runRetros).not.toHaveBeenCalled();
+    expect(runRetroFile).not.toHaveBeenCalled();
+    expect(runLearnings).not.toHaveBeenCalled();
+    expect(log.mock.calls.some(([line]) => String(line).includes('event=start'))).toBe(false);
+  });
 });

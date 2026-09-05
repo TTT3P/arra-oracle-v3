@@ -17,7 +17,8 @@ import path from 'node:path';
 import type { IndexerConfig } from '../../src/types.ts';
 import { OracleIndexer } from '../../src/indexer/index.ts';
 import { parseIndexerCliArgs } from '../../src/indexer/cli.ts';
-import { validateLearningsRoot } from '../../src/indexer/learnings-pass.ts';
+import { collectLearningsCandidates, validateLearningsRoot } from '../../src/indexer/learnings-pass.ts';
+import { runOracleReindexLearnings } from '../../src/indexer/runner.ts';
 
 const originalEnv = { dataDir: process.env.ORACLE_DATA_DIR, dbPath: process.env.ORACLE_DB_PATH, owner: process.env.ORACLE_MEMORY_OWNER_ROOT };
 let cleanup: string[] = [];
@@ -150,9 +151,9 @@ describe('scope=learnings root validation (fail-closed)', () => {
     process.env.ORACLE_MEMORY_OWNER_ROOT = path.join(h.tmp, 'other-owner');
     expect(() => validateLearningsRoot(h.repoRoot)).toThrow(/bound memory owner/);
     process.env.ORACLE_MEMORY_OWNER_ROOT = h.repoRoot;
-    expect(validateLearningsRoot(h.repoRoot)).toBe(path.resolve(h.repoRoot));
+    expect(validateLearningsRoot(h.repoRoot)).toBe(fs.realpathSync(h.repoRoot)); // real path, symlinks resolved
     delete process.env.ORACLE_MEMORY_OWNER_ROOT;
-    expect(validateLearningsRoot(`${h.repoRoot}/`)).toBe(path.resolve(h.repoRoot));
+    expect(validateLearningsRoot(`${h.repoRoot}/`)).toBe(fs.realpathSync(h.repoRoot));
   });
 });
 
@@ -166,5 +167,46 @@ describe('indexer CLI --scope', () => {
     expect(() => parseIndexerCliArgs(['--dry-run'])).toThrow(/only supported with --scope learnings/);
     expect(() => parseIndexerCliArgs(['--scope', 'retros', '--repo-root', '/x'])).toThrow(/--scope must be/);
     expect(() => parseIndexerCliArgs(['--scope', 'learnings', '--repo-root', '/x', '--confirm-delete', '0'])).toThrow(/never prunes/);
+  });
+});
+
+describe('scope=learnings containment (Riddler PR#21)', () => {
+  test('a learnings dir or a file inside it that symlinks outside the root is refused before anything is read', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'arra-learnings-outside-'));
+    cleanup.push(outside);
+    fs.writeFileSync(path.join(outside, 'outside.md'), '# Outside\n\nmust never become a candidate');
+    const linkRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'arra-learnings-linkroot-'));
+    cleanup.push(linkRoot);
+    fs.mkdirSync(path.join(linkRoot, 'ψ', 'memory'), { recursive: true });
+    fs.symlinkSync(outside, path.join(linkRoot, 'ψ', 'memory', 'learnings'));
+    expect(() => validateLearningsRoot(linkRoot)).toThrow(/resolves outside the root/);
+
+    const fileLinkRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'arra-learnings-filelink-'));
+    cleanup.push(fileLinkRoot);
+    fs.mkdirSync(path.join(fileLinkRoot, 'ψ', 'memory', 'learnings', 'sub'), { recursive: true });
+    fs.symlinkSync(path.join(outside, 'outside.md'), path.join(fileLinkRoot, 'ψ', 'memory', 'learnings', 'sub', 'link.md'));
+    expect(() => validateLearningsRoot(fileLinkRoot)).toThrow(/symlink inside the learnings tree/);
+  });
+
+  test('dry run through the runner opens no database: a nonexistent ORACLE_DB_PATH stays nonexistent', async () => {
+    const h = harness('dry-nodb');
+    const freshDb = path.join(h.dataDir, 'never-created.db');
+    process.env.ORACLE_DB_PATH = freshDb;
+    const result = await runOracleReindexLearnings({ repoRoot: h.repoRoot, dryRun: true });
+    expect(result.dryRun).toBe(true);
+    expect(result.files).toBe(2);
+    expect(fs.existsSync(freshDb)).toBe(false);
+    expect(fs.existsSync(`${freshDb}-wal`)).toBe(false);
+    expect(fs.readdirSync(h.dataDir)).toEqual([]);
+  });
+
+  test('project-first ψ dirs inside the root are not part of this scope (counted, not stored)', () => {
+    const h = harness('project-first');
+    const nested = path.join(h.repoRoot, 'github.com', 'acme', 'repo', 'ψ', 'memory', 'learnings');
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(path.join(nested, '2026-09-05_nested.md'), '# Nested\n\nnested project-first learning body');
+    const c = collectLearningsCandidates(h.config);
+    expect(c.sourceFiles).toEqual(['ψ/memory/learnings/2026-09-05_alpha.md', 'ψ/memory/learnings/2026-09-05_beta.md']);
+    expect(c.skippedOutsideTree).toBeGreaterThan(0);
   });
 });
