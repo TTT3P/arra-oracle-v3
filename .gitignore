@@ -21,6 +21,10 @@ chroma/
 .env.production
 .env.staging
 .env.*.local
+# any other .env variant (backups like .env.bak-*, copies) — secret-bearing, never tracked
+.env.*
+!.env.example
+!.env.production.example
 
 # IDE
 .vscode/

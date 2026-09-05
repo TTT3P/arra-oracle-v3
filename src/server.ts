@@ -74,6 +74,7 @@ import { tenantsRoutes } from './routes/tenants/index.ts';
 import { watcherRoutes } from './routes/watcher/index.ts';
 import { indexerRoutes } from './routes/indexer/index.ts';
 import { fileWatcherService } from './services/file-watcher.ts';
+import { resolveRemoteAddress, runWithRemoteAddress } from './middleware/remote-address.ts';
 import { createSleepConsolidationWorker } from './workers/sleep-consolidation.ts';
 import { createEntityBackfillWorker } from './workers/entity-backfill.ts';
 import { gatewayPlugin } from './gateway/index.ts';
@@ -82,7 +83,7 @@ import { simpleModeResponse } from './simple-mode.ts';
 import pkg from '../package.json' with { type: 'json' };
 
 type UnifiedRuntime = Awaited<ReturnType<typeof loadUnifiedPlugins>>;
-type ServerSpec = { hostname: string; port: number; fetch(request: Request): Response | Promise<Response> };
+type ServerSpec = { hostname: string; port: number; fetch(request: Request, server?: ReturnType<typeof Bun.serve>): Response | Promise<Response> };
 type ElysiaApp = Elysia<any, any, any, any, any, any, any>;
 type RouteModule = Parameters<ElysiaApp['use']>[0];
 export interface StartServerOptions { writePidFile?: boolean }
@@ -243,7 +244,8 @@ export async function createStartedApp(options: StartServerOptions = {}): Promis
   await seedMenus(app, unifiedPlugins);
   await announceStartup(app, startupConfig);
   const serverFetch = createRequestTimeoutFetch(createRequestDedupFetch(createApiVersionedFetch(createTenantFetch(createDbContextFetch((request: Request) => app.fetch(request))))));
-  return { hostname: resolveBindHost(), port: Number(PORT), fetch: (request) => drainingResponseFor(request) ?? trackRequest(() => serverFetch(request)) };
+  // Client address is resolved here, on the ORIGINAL request (wrappers below clone it), and carried by AsyncLocalStorage.
+  return { hostname: resolveBindHost(), port: Number(PORT), fetch: (request, server) => runWithRemoteAddress(resolveRemoteAddress(server, request), () => drainingResponseFor(request) ?? trackRequest(() => serverFetch(request))) };
 }
 
 function resetIndexerStatus(): void {
