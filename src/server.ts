@@ -1,11 +1,11 @@
 import { Elysia } from 'elysia';
 import { join } from 'node:path';
 import { swagger } from '@elysiajs/swagger';
-import { eq } from 'drizzle-orm';
 import { configure, writePidFile, removePidFile } from './process-manager/index.ts';
 import { PORT, ORACLE_DATA_DIR, VECTOR_URL } from './config.ts';
 import { MCP_SERVER_NAME } from './const.ts';
-import { db, sqlite, closeDb, indexingStatus, settings } from './db/index.ts';
+import { db, sqlite, closeDb, settings } from './db/index.ts';
+import { markInterruptedIndexingOnStartup } from './indexer/status.ts';
 import { isApiAuthorized, isApiPathProtected, unauthorizedApiResponse } from './server/api-token-auth.ts';
 import { seedMenuItems, type HasRoutes as SeedHasRoutes } from './db/seeders/menu-seeder.ts';
 import { createCorsMiddleware, createPrivateNetworkPreflightMiddleware } from './middleware/cors.ts';
@@ -248,8 +248,7 @@ export async function createStartedApp(options: StartServerOptions = {}): Promis
 
 function resetIndexerStatus(): void {
   try {
-    db.update(indexingStatus).set({ isIndexing: 0 }).where(eq(indexingStatus.id, 1)).run();
-    console.log('🔮 Reset indexing status on startup');
+    if (markInterruptedIndexingOnStartup(db)) console.warn('🔮 Previous indexing run was interrupted by a restart — marked incomplete in indexing_status');
   } catch {}
 }
 
