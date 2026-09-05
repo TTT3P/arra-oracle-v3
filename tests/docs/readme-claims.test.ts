@@ -114,7 +114,7 @@ describe('README/docs advertised claims', () => {
     expect(mineBlock).toMatch(/arra mine ~\/notes/);
     // The Docker smoke of this hero path (build image, run container, hit /api/health) is NOT
     // part of the PR gate: it lives in tests/integration/readme-docker-hero.test.ts and runs in
-    // the scheduled docker-hero-smoke workflow (audit 2026-09-05 P1-1: it kept the gate red).
+    // the scheduled scheduled-smokes workflow (audit 2026-09-05 P1-1: it kept the gate red).
   });
 
   test('arra mine smoke ingests a folder through the advertised CLI', async () => {

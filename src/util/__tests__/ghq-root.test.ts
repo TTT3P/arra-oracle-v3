@@ -46,4 +46,25 @@ describe('detectGhqRoot', () => {
     process.env.HOME = tempDir('ghq-home-'); // no ~/ghq inside
     expect(detectGhqRoot('/srv/ghq/github.com/org/repo')).toBe('/srv/ghq');
   });
+
+  test('last resort also derives root from any hostname-shaped ghq layout', () => {
+    delete process.env.GHQ_ROOT;
+    process.env.PATH = '/nonexistent-bin';
+    process.env.HOME = tempDir('ghq-home-');
+    expect(detectGhqRoot('/srv/ghq/gitlab.com/org/repo')).toBe('/srv/ghq');
+  });
+
+  test('never derives `/` or an arbitrary ancestor from a non-ghq repo path (CI run 33972937476)', () => {
+    delete process.env.GHQ_ROOT;
+    process.env.PATH = '/nonexistent-bin';
+    const home = tempDir('ghq-home-'); // no ~/ghq inside
+    process.env.HOME = home;
+    // A tmp fixture / container root: walking up three levels would reach `/` and
+    // turn every ghq-aware sweep into a whole-filesystem scan with a git subprocess
+    // per symlink. The answer is the (possibly absent) default location instead.
+    expect(detectGhqRoot('/tmp/arra-tools-repo-abc123')).toBe(path.join(home, 'ghq'));
+    expect(detectGhqRoot('/app')).toBe(path.join(home, 'ghq'));
+    expect(detectGhqRoot('/home/user/projects/repo')).toBe(path.join(home, 'ghq'));
+    expect(detectGhqRoot('/x/y/z')).not.toBe('/');
+  });
 });

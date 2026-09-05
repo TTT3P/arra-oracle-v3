@@ -126,7 +126,7 @@ jobs:
           done
 
       # Deliberately NOT in the loop above:
-      #   tests/integration/  — docker-backed smokes (compose stack, README hero path); scheduled docker-hero-smoke.yml
+      #   tests/integration/  — docker-backed smokes (compose stack, README hero path); scheduled scheduled-smokes.yml
       #   tests/benchmarks/   — timing-sensitive, belongs in a scheduled job not a PR gate
       #   tests/e2e/          — *.e2e.ts, needs a browser; not picked up by bun test anyway
       - name: Run scoped integration tests

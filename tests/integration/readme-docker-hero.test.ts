@@ -5,7 +5,7 @@
  * Moved out of tests/docs/readme-claims.test.ts (audit 2026-09-05 P1-1): it needs a Docker
  * daemon and a multi-minute image build, which kept the PR gate ("Typecheck and scoped
  * tests") red. tests/integration/ is deliberately not in the PR gate; this file runs in the
- * scheduled `docker-hero-smoke` workflow (and on workflow_dispatch). The README text
+ * scheduled `scheduled-smokes` workflow (and on workflow_dispatch). The README text
  * assertions for the same section stay in the PR gate.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';

@@ -18,7 +18,10 @@ describe('tool-groups', () => {
     expect(Object.keys(TOOL_GROUPS)).toHaveLength(7);
     expect(TOOL_GROUPS.search).toHaveLength(6);
     expect(TOOL_GROUPS.search).toContain('oracle_ask');
-    expect(TOOL_GROUPS.knowledge).toHaveLength(4);
+    // knowledge = learn, index_retro, stats, supersede + research_note (added with the research-note tool; the
+    // table said 4 while the group had 5, red on alpha until the PR gate first ran the src/ group on 2026-09-05).
+    expect(TOOL_GROUPS.knowledge).toHaveLength(5);
+    expect(TOOL_GROUPS.knowledge).toContain('oracle_research_note');
     expect(TOOL_GROUPS.oracle).toEqual(['oracle_profile', 'oracle_recap']);
     expect(TOOL_GROUPS.trace).toHaveLength(7);
     expect(TOOL_GROUPS.standalone).toHaveLength(2);

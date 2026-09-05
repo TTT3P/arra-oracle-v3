@@ -59,7 +59,12 @@ const REQUIRED_SEGMENTS = [
   'inbox', 'indexer', 'learn', 'list', 'logs', 'map', 'map3d', 'mcp', 'memory', 'menu',
   'metrics', 'openapi.json', 'oracles', 'plugins', 'read', 'reflect', 'research', 'schedule',
   'search', 'send', 'session', 'sessions', 'settings', 'similar', 'stats', 'supersede',
-  'tenants', 'thread', 'threads', 'traces', 'v1', 'vault', 'vector', 'verify', 'watcher',
+  // 'v1' is deliberately NOT here: /api/v1/* is produced by the api-version rewrite
+  // (src/middleware/api-version.ts), not by a registered route. The segment only ever came from
+  // src/routes/search/chain.ts mounting '/v1/search/chain' on top of the rewrite; 8ec3bb70 moved it
+  // behind the rewrite on purpose (git bisect 75c6ece8..d9c8a997 with this file; live
+  // POST /api/v1/search/chain still 200). CROO ruling 2026-09-05.
+  'tenants', 'thread', 'threads', 'traces', 'vault', 'vector', 'verify', 'watcher',
 ] as const;
 
 function apiSegments(): Set<string> {
