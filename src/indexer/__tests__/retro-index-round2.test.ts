@@ -9,14 +9,21 @@
  *   - slice by doc count instead of file boundary → a straddled file's earlier chunks get
  *     superseded by its own later batch (test e "active == new set" fails).
  * Riddler P2: test b asserted a counter the code itself increments. Here the boundary is read off
- * the connection (native BEGIN/COMMIT/ROLLBACK via `Database.prototype.transaction`) and off a
- * SECOND connection that must see each batch land before the next one starts.
+ * the connection (raw BEGIN/COMMIT/ROLLBACK through `Database.run`, savepoints through
+ * `Database.transaction`) and off a SECOND connection that must see each batch land before the
+ * next one starts.
+ * Riddler round-2 P1 (test h): a DB error in the supersede step after the store used to leave one
+ * file with BOTH generations current through the real `handleSearch`. Fix: one outer transaction
+ * per batch publishes store + supersede atomically. Negative control: remove the outer BEGIN/COMMIT
+ * → h fails (mixed current results), b2 fails (outer counts).
  */
 import { afterEach, expect, test } from 'bun:test';
 import path from 'node:path';
 import { Database } from 'bun:sqlite';
 import { createDatabase } from '../../db/index.ts';
 import { indexRetrospectives } from '../retro-index.ts';
+import { handleSearch } from '../../tools/search/handler.ts';
+import type { ToolContext } from '../../tools/types.ts';
 import {
   countRows, dropPoison, poisonAfterInserts, retroEnv, runCleanups, seedLegacy, viewDb, withTxnCounter,
 } from './retro-index-fixtures.ts';
@@ -109,9 +116,11 @@ test('b2. one native transaction per batch, each visible to a second connection 
   }));
   reader.close();
   expect(result.batches).toBe(5);
-  expect(txn.begin - base.begin).toBe(5);
-  expect(txn.commit - base.commit).toBe(5);
-  expect(txn.rollback).toBe(0);
+  // One raw outer BEGIN/COMMIT per batch (the atomic publish), storeDocuments' own transaction
+  // nested inside it as a savepoint — never a commit of its own.
+  expect(txn.outer).toEqual({ begin: 5, commit: 5, rollback: 0 });
+  expect(txn.nested.begin - base.nested.begin).toBe(5);
+  expect(txn.nested.rollback).toBe(0);
   expect(seen).toEqual([6, 12, 18, 24, 27]); // every batch durable before the loop moved on
 
   const single = retroEnv(9, 3);
@@ -122,7 +131,7 @@ test('b2. one native transaction per batch, each visible to a second connection 
     batchSize: 100000, onBatch: () => seen2.push((reader2.prepare('SELECT COUNT(*) AS n FROM oracle_documents').get() as { n: number }).n),
   }));
   reader2.close();
-  expect(one.begin - base.begin).toBe(1); // the old single-transaction shape
+  expect(one.outer).toEqual({ begin: 1, commit: 1, rollback: 0 }); // the old single-transaction shape
   expect(seen2).toEqual([27]);
 
   const poisoned = retroEnv(9, 3);
@@ -130,6 +139,56 @@ test('b2. one native transaction per batch, each visible to a second connection 
   poisonAfterInserts(poisoned.dbPath, 12);
   const { txn: failed } = await withTxnCounter(() =>
     indexRetrospectives(poisoned.repoRoot, poisoned.dbPath, { batchSize: 4 }).catch((err: Error) => err));
-  expect(failed.commit - base.commit).toBe(2);
-  expect(failed.rollback).toBe(1); // the failing batch rolled back, nothing else did
+  expect(failed.outer).toEqual({ begin: 3, commit: 2, rollback: 1 }); // the failing batch rolled back, nothing else did
+  expect(failed.nested.rollback).toBe(1);
+});
+
+test('h. a DB failure in the supersede step AFTER the store rolls the whole batch back — the real search handler never sees two current generations', async () => {
+  // Riddler round-2 reproduction: 2 files × 3 sections, 2 legacy rows per file, and a trigger that
+  // aborts the moment a legacy row would be superseded — a DB error after storeDocuments' own
+  // transaction has run, i.e. exactly the window round 2 left open.
+  const { dbPath, repoRoot, relPaths } = retroEnv(2, 3, 900);
+  const legacy = seedLegacy(dbPath, relPaths, 2);
+  const setup = createDatabase(dbPath);
+  setup.sqlite.run("CREATE TRIGGER fail_supersede BEFORE UPDATE OF superseded_by ON oracle_documents WHEN OLD.id LIKE 'legacy_%' AND NEW.superseded_by IS NOT NULL BEGIN SELECT RAISE(ABORT, 'supersede failure after store'); END");
+  setup.sqlite.close();
+  await expect(indexRetrospectives(repoRoot, dbPath, { batchSize: 1 })).rejects.toThrow(/supersede failure after store/);
+
+  const isLegacy = (id: string) => id.startsWith('legacy_');
+  const search = async () => {
+    const read = createDatabase(dbPath);
+    const ctx = { ...read, repoRoot, vectorStatus: 'unavailable', version: 'test', vectorStore: null } as unknown as ToolContext;
+    try {
+      const body = JSON.parse((await handleSearch(ctx, { query: 'session', mode: 'fts', type: 'retro', limit: 100 })).content[0].text);
+      return (body.results as Array<{ id: string; source_file: string; superseded: unknown }>);
+    } finally { read.sqlite.close(); }
+  };
+
+  // Storage: the batch rolled back as a unit — legacy rows current, no trace of the new generation.
+  const state = viewDb(dbPath);
+  for (const rel of relPaths) expect([...state.activeBySource.get(rel)!].sort()).toEqual([...legacy.get(rel)!].sort());
+  expect([...state.ftsIds].some((id) => !isLegacy(id))).toBe(false);
+  expect(state.status.is_indexing).toBe(1);
+  expect(state.status.error).toMatch(/supersede failure/);
+  expect(state.status.completed_at).toBeNull();
+  // The real read path: every current result is legacy, and no file mixes generations.
+  const results = await search();
+  expect(results.length).toBeGreaterThan(0);
+  const current = results.filter((r) => r.superseded === null || r.superseded === undefined);
+  expect(current.every((r) => isLegacy(r.id))).toBe(true);
+  for (const rel of relPaths) {
+    const ids = results.filter((r) => r.source_file === rel).map((r) => r.id);
+    expect(ids.some(isLegacy) && ids.some((id) => !isLegacy(id))).toBe(false);
+  }
+
+  // Rerun once the fault is gone: converges, marker closes, search shows only the new generation as current.
+  const fix = createDatabase(dbPath); fix.sqlite.run('DROP TRIGGER fail_supersede'); fix.sqlite.close();
+  const rerun = await indexRetrospectives(repoRoot, dbPath, { batchSize: 1 });
+  expect(rerun.ids.length).toBe(12);
+  const after = viewDb(dbPath);
+  expect(after.status.is_indexing).toBe(0);
+  expect(after.status.error).toBeNull();
+  const currentAfter = (await search()).filter((r) => r.superseded === null || r.superseded === undefined);
+  expect(currentAfter.length).toBeGreaterThan(0);
+  expect(currentAfter.some((r) => isLegacy(r.id))).toBe(false);
 });

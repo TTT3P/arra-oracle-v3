@@ -32,7 +32,7 @@ import type { IndexerConfig, OracleDocument } from '../types.ts';
  * Batching (PR-B slice d). A whole-root retros pass over the canonical root was ONE giant
  * `storeDocuments` transaction: it held the single Bun event loop for ~2 min and buffered the entire
  * change set — the slice-b live wedge (2026-09-05). Each batch here is its own transaction, closed
- * only at a source-file boundary, followed by its own supersede pass and a real event-loop yield.
+ * only at a source-file boundary, publishing store + supersede atomically, then a real event-loop yield.
  *
  * Batch size is adaptive by default (see `retro-batch.ts`): it steers each batch's wall time toward
  * `targetMs` (default 500 ms, a quarter of the fleet's 2 s liveness abort). `ORACLE_RETROS_BATCH_SIZE` or an
@@ -126,16 +126,27 @@ export async function indexRetrospectives(
     let planned = takeFileAlignedBatch(queue, cursor, target);
     while (planned) {
       const startedAt = performance.now();
-      // Each batch is its own storeDocuments transaction: a failure rolls back only this batch,
-      // earlier batches stay committed, and the upserts make a rerun idempotent (resumable). Its
-      // bulk pointer flush scans the tenant table once, so scans stay O(batches), not O(docs).
-      await storeDocuments(sqlite, db, null, project, planned.docs, { createdBy: 'retro_indexer', tenantId });
-      // Upserting new deterministic ids leaves legacy active rows for the same source files behind,
-      // which duplicates search results. Supersede them NOW, for this batch's files only (never
-      // hard-delete): the batch is file-aligned, so every chunk of each file is already stored, and
-      // search never sees a file with legacy AND new generations active past this point.
       const chunked = chunkDocumentsForIndexing(planned.docs);
-      superseded += supersedeReplacedSourceDocs(db, chunked, tenantId);
+      // One outer transaction per batch publishes the batch's new generation AND supersedes the
+      // legacy rows of the same files atomically. storeDocuments' own db.transaction nests inside
+      // it as a SAVEPOINT (bun:sqlite nests when db.inTransaction; verified at the owning surface:
+      // the inner does not commit, a second connection sees nothing until COMMIT here). So a
+      // failure anywhere — store or supersede — rolls back the whole batch: search can never see
+      // legacy AND new generations current for one file (Riddler round-2 P1). Earlier batches stay
+      // committed, and the upserts make a rerun idempotent (resumable). The bulk pointer flush
+      // scans the tenant table once per batch, so scans stay O(batches), not O(docs).
+      sqlite.run('BEGIN IMMEDIATE');
+      try {
+        await storeDocuments(sqlite, db, null, project, planned.docs, { createdBy: 'retro_indexer', tenantId });
+        // Upserting new deterministic ids leaves legacy active rows for the same source files
+        // behind, which duplicates search results. Supersede them for this batch's files only (never
+        // hard-delete): the batch is file-aligned, so every chunk of each file is in this transaction.
+        superseded += supersedeReplacedSourceDocs(db, chunked, tenantId);
+        sqlite.run('COMMIT');
+      } catch (err) {
+        if (sqlite.inTransaction) sqlite.run('ROLLBACK');
+        throw err;
+      }
       for (const doc of chunked) ids.push(doc.id);
       batches += 1;
       files += planned.files;

@@ -118,24 +118,37 @@ export const countRows = (dbPath: string, sql: string): number => {
 };
 
 export interface TxnCounts { begin: number; commit: number; rollback: number }
+/** `outer`: raw BEGIN/COMMIT/ROLLBACK statements issued through `Database.run` (the per-batch
+ * publish transaction); `nested`: `Database.transaction` callbacks (drizzle `db.transaction`, which
+ * bun:sqlite runs as SAVEPOINTs while an outer transaction is open) — begin = entered,
+ * commit = returned, rollback = threw. */
+export interface TxnTrace { outer: TxnCounts; nested: TxnCounts }
 
-/** Count native transaction boundaries: every drizzle `db.transaction` runs through here. */
-export async function withTxnCounter<T>(run: () => Promise<T>): Promise<{ result: T; txn: TxnCounts }> {
-  const txn: TxnCounts = { begin: 0, commit: 0, rollback: 0 };
+/** Count transaction boundaries on the connection itself, not a counter the code under test owns. */
+export async function withTxnCounter<T>(run: () => Promise<T>): Promise<{ result: T; txn: TxnTrace }> {
+  const txn: TxnTrace = { outer: { begin: 0, commit: 0, rollback: 0 }, nested: { begin: 0, commit: 0, rollback: 0 } };
   type Fn = (...args: unknown[]) => unknown;
-  const proto = Database.prototype as unknown as { transaction: Fn };
-  const original = proto.transaction;
+  const proto = Database.prototype as unknown as { transaction: Fn; run: Fn };
+  const originalTx = proto.transaction;
+  const originalRun = proto.run;
   const instrument = (f: Fn): Fn => function (this: unknown, ...args: unknown[]) {
-    txn.begin++;
-    try { const r = f.apply(this, args); txn.commit++; return r; } catch (err) { txn.rollback++; throw err; }
+    txn.nested.begin++;
+    try { const r = f.apply(this, args); txn.nested.commit++; return r; } catch (err) { txn.nested.rollback++; throw err; }
   };
   proto.transaction = function (this: unknown, ...args: unknown[]) {
-    const native = original.apply(this, args) as Fn & Record<string, Fn>;
+    const native = originalTx.apply(this, args) as Fn & Record<string, Fn>;
     const wrapped = instrument(native) as Fn & Record<string, Fn>;
     for (const mode of ['deferred', 'immediate', 'exclusive']) wrapped[mode] = instrument(native[mode]);
     return wrapped;
   };
-  try { return { result: await run(), txn }; } finally { proto.transaction = original; }
+  proto.run = function (this: unknown, ...args: unknown[]) {
+    const sql = typeof args[0] === 'string' ? args[0] : '';
+    if (/^\s*begin\b/i.test(sql)) txn.outer.begin++;
+    else if (/^\s*commit\b/i.test(sql)) txn.outer.commit++;
+    else if (/^\s*rollback\b/i.test(sql)) txn.outer.rollback++;
+    return originalRun.apply(this, args);
+  };
+  try { return { result: await run(), txn }; } finally { proto.transaction = originalTx; proto.run = originalRun; }
 }
 
 /** Event-loop lag: a setTimeout chain records how late each tick fires. `stop` first lets one
