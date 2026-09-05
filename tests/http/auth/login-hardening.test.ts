@@ -54,10 +54,10 @@ test('POST /api/auth/login treats corrupt stored hashes as auth failure', async 
   expect(await res.json()).toMatchObject({ success: false, error: 'Invalid password' });
 });
 
-test('isLocalIp recognizes IPv4-mapped local addresses narrowly', () => {
+test('isLocalIp is loopback-only (RFC1918 no longer counts as local, audit 2026-09-05)', () => {
   expect(isLocalIp(' ::ffff:127.0.0.1 ')).toBe(true);
-  expect(isLocalIp('::ffff:10.2.3.4')).toBe(true);
-  expect(isLocalIp('172.31.255.255')).toBe(true);
+  expect(isLocalIp('::ffff:10.2.3.4')).toBe(false);
+  expect(isLocalIp('172.31.255.255')).toBe(false);
   expect(isLocalIp('172.32.0.1')).toBe(false);
   expect(isLocalIp('::ffff:8.8.8.8')).toBe(false);
 });

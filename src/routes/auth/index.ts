@@ -9,6 +9,7 @@ import { Elysia } from 'elysia';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { getScopedSetting } from '../../db/scoped-settings.ts';
 import { activeTenantId, DEFAULT_TENANT_ID } from '../../middleware/tenant.ts';
+import { currentRemoteAddress, resolveRemoteAddress } from '../../middleware/remote-address.ts';
 import { statusRoute } from './status.ts';
 import { loginRoute } from './login.ts';
 import { logoutRoute } from './logout.ts';
@@ -18,42 +19,33 @@ export const SESSION_COOKIE_NAME = 'oracle_session';
 export const SESSION_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 type SessionPayload = { exp: number; tenant: string };
 
+/**
+ * "Local" means the loopback interface only (audit 2026-09-05). The previous
+ * RFC1918 whitelist (192.168/16, 10/8, 172.16/12) let any LAN or tailnet client
+ * skip the password whenever `auth_local_bypass` was on.
+ */
 export function isLocalIp(ip: string): boolean {
   const value = ip.trim().toLowerCase();
   const normalized = value.startsWith('::ffff:') ? value.slice('::ffff:'.length) : value;
-  return normalized === '127.0.0.1'
-      || normalized === '::1'
-      || normalized === 'localhost'
-      || normalized.startsWith('192.168.')
-      || normalized.startsWith('10.')
-      || normalized.startsWith('172.16.')
-      || normalized.startsWith('172.17.')
-      || normalized.startsWith('172.18.')
-      || normalized.startsWith('172.19.')
-      || normalized.startsWith('172.20.')
-      || normalized.startsWith('172.21.')
-      || normalized.startsWith('172.22.')
-      || normalized.startsWith('172.23.')
-      || normalized.startsWith('172.24.')
-      || normalized.startsWith('172.25.')
-      || normalized.startsWith('172.26.')
-      || normalized.startsWith('172.27.')
-      || normalized.startsWith('172.28.')
-      || normalized.startsWith('172.29.')
-      || normalized.startsWith('172.30.')
-      || normalized.startsWith('172.31.');
+  return normalized === '127.0.0.1' || normalized === '::1' || normalized === 'localhost';
 }
 
-export function remoteAddress(server: any, request: Request): string {
-  try {
-    const info = server?.requestIP?.(request);
-    if (info && typeof info.address === 'string') return info.address;
-  } catch { /* ignore */ }
-  return '127.0.0.1';
+/**
+ * Client address as Bun reports it, or null when it cannot be resolved (no
+ * server handle — e.g. `app.fetch` outside `Bun.serve` — or `requestIP`
+ * unavailable). Never a loopback default: an unknown address is not local.
+ */
+export function remoteAddress(server: any, request: Request): string | null {
+  // Served requests: the address captured on the original Request (wrappers clone it).
+  const captured = currentRemoteAddress();
+  if (captured !== undefined) return captured;
+  // Direct handler calls (tests, app.handle): ask the given server, unknown → null.
+  return resolveRemoteAddress(server, request);
 }
 
 export function isLocalNetwork(server: any, request: Request): boolean {
-  return isLocalIp(remoteAddress(server, request));
+  const address = remoteAddress(server, request);
+  return address !== null && isLocalIp(address);
 }
 
 function signatureFor(value: string): string {
