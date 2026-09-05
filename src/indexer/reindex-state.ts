@@ -1,5 +1,5 @@
 import { and, desc, eq, inArray, isNull, notInArray, or, sql } from 'drizzle-orm';
-import { indexingJobs, oracleDocuments, oracleFts } from '../db/schema.ts';
+import { indexingJobs, oracleDocuments } from '../db/schema.ts';
 import { asOracleDb, type OracleDb, type OracleDbInput } from '../db/drizzle-input.ts';
 import type { OracleDocument } from '../types.ts';
 import { enqueueIndexJob } from './jobs.ts';
@@ -15,22 +15,45 @@ export interface VectorQueueStats {
 
 const REINDEX_REASON = 'superseded by indexer reindex';
 
+/**
+ * Snapshot of every active indexer document's FTS content, keyed by id.
+ *
+ * Two defects in the previous correlated form
+ * (`SELECT GROUP_CONCAT(content) FROM oracle_fts WHERE ${oracleFts.id} = ${oracleDocuments.id}`
+ * as a `sql` field of a single-table `db.select`):
+ * 1. Drizzle strips the table qualifier from Column refs inside a selection `sql` fragment on a
+ *    single-table select, so it rendered `WHERE "id" = "id"` — true for every FTS row — and every
+ *    document's "before" content was the whole FTS table concatenated. `changedDocumentIds` then
+ *    saw every document as changed (pinned by tests/indexer/snapshot-set-based.test.ts).
+ * 2. `oracle_fts.id` is UNINDEXED (FTS5), so even the intended query scans the whole FTS table
+ *    once per active document: O(docs × fts_rows), 88 s for 10,719 docs on a live copy.
+ * This form scans `oracle_fts` exactly once into a temp table and groups by id (0.16 s on the same
+ * copy). `ORDER BY r` (the FTS rowid) inside GROUP_CONCAT pins the concatenation to FTS scan order,
+ * including duplicate rows for one id, so the result equals the intended correlated query byte for
+ * byte (needs SQLite ≥ 3.44). No Column refs are interpolated into raw SQL here on purpose. The
+ * temp table is connection-local and dropped in `finally`; the function is synchronous, so two
+ * snapshots can never interleave on one connection.
+ */
 export function snapshotActiveIndexerDocs(input: OracleDbInput, tenantId?: string): DocSnapshot {
   const db = asOracleDb(input);
-  const rows = db.select({
-    id: oracleDocuments.id,
-    sourceFile: oracleDocuments.sourceFile,
-    content: sql<string | null>`(
-      SELECT GROUP_CONCAT(${oracleFts.content}, '\n')
-      FROM ${oracleFts}
-      WHERE ${oracleFts.id} = ${oracleDocuments.id}
-    )`,
-  })
-    .from(oracleDocuments)
-    .where(activeIndexerWhere(tenantId))
-    .all();
-
-  return new Map(rows.map((row) => [row.id, { sourceFile: row.sourceFile, content: row.content }]));
+  db.run(sql`DROP TABLE IF EXISTS temp.fts_snapshot_rows`);
+  db.run(sql`CREATE TEMP TABLE fts_snapshot_rows (r INTEGER PRIMARY KEY, id TEXT, content TEXT)`);
+  try {
+    db.run(sql`INSERT INTO temp.fts_snapshot_rows (r, id, content) SELECT rowid, id, content FROM oracle_fts`);
+    const contentById = new Map<string, string | null>();
+    for (const [id, content] of db.values<[string, string | null]>(sql`
+      SELECT id, GROUP_CONCAT(content, char(10) ORDER BY r)
+      FROM temp.fts_snapshot_rows WHERE id IS NOT NULL GROUP BY id`)) {
+      contentById.set(id, content);
+    }
+    const docs = db.select({ id: oracleDocuments.id, sourceFile: oracleDocuments.sourceFile })
+      .from(oracleDocuments)
+      .where(activeIndexerWhere(tenantId))
+      .all();
+    return new Map(docs.map((doc) => [doc.id, { sourceFile: doc.sourceFile, content: contentById.get(doc.id) ?? null }]));
+  } finally {
+    db.run(sql`DROP TABLE IF EXISTS temp.fts_snapshot_rows`);
+  }
 }
 
 export function changedDocumentIds(before: DocSnapshot, documents: OracleDocument[]): Set<string> {

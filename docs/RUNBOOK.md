@@ -133,6 +133,15 @@ launchd-managed process and must not be used as a restart path while launchd own
   throughout. Use bounded `scope=retro-file` per file (4–13 s each, proven) for targeted gaps.
   Receipts: `oracle-maint-oracle/ψ/findings/2026-09-04_missing678-reindex-receipt.md`,
   `…/2026-09-05_pr15-sliced-deploy-receipt.md`.
+  Cause found 2026-09-05 (`…/2026-09-05_pr15-live-10x-diagnosis-fts-scan.md`): `oracle_fts.id` is
+  UNINDEXED, so every `WHERE id = ?` on the FTS table is a full scan, and the 0032 concepts-sync trigger
+  fired a second scan per chunk on every upsert. **Slice (g-min)** (migration `0042`, this checkout):
+  the trigger fires only when `concepts` changes (per-chunk cost ≈ halved: 10× FTS canary 1.4–1.6 s/file
+  with `/health/live` timeouts → 0.8 s/file, 0 timeouts) and the full-reindex snapshot
+  (`snapshotActiveIndexerDocs`, `scope=all` path only, not retros) scans FTS once instead of per document
+  (23 s → 0.16 s on a live copy; it also returned every document the whole FTS table before, so every
+  document counted as changed). This is ~2× on the retros/retro-file path, **not the 40×**: the by-id
+  delete per chunk remains until slice (g-fast), which needs the single-writer FTS topology first.
 - Retros-only reindex (non-pruning, released; last executed 2026-09-05 under the hold above —
   supervised, contained). **Start it with `wait:false` and follow the marker**: every request is
   capped by the server-wide `ARRA_REQUEST_TIMEOUT_MS` (default 30 000 ms, `src/middleware/timeout.ts`),
