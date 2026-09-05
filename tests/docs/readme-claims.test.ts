@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import pkg from '../../package.json' with { type: 'json' };
-import { smokeArraMine, smokeDockerHeroPath } from './readme-claim-smoke.ts';
+import { smokeArraMine } from './readme-claim-smoke.ts';
 
 const repoRoot = process.cwd();
 const readme = readFileSync('README.md', 'utf8');
@@ -112,11 +112,10 @@ describe('README/docs advertised claims', () => {
     const mineBlock = readme.match(/### 2\. Mine your notes[\s\S]*?```bash\n([\s\S]*?)```/)?.[1] ?? '';
     expect(mineBlock).toMatch(/docker exec "\$ARRA_CONTAINER" bun dist-cli\/index\.js "\$@"/);
     expect(mineBlock).toMatch(/arra mine ~\/notes/);
-    if (!(await dockerIsAvailable())) return;
-    const health = await smokeDockerHeroPath(repoRoot, scratch);
-    expect(health.status).toBe('ok');
-    expect(health.dbCheck.path).toBe('/data/oracle.db');
-  }, 240_000);
+    // The Docker smoke of this hero path (build image, run container, hit /api/health) is NOT
+    // part of the PR gate: it lives in tests/integration/readme-docker-hero.test.ts and runs in
+    // the scheduled docker-hero-smoke workflow (audit 2026-09-05 P1-1: it kept the gate red).
+  });
 
   test('arra mine smoke ingests a folder through the advertised CLI', async () => {
     // Asserted through the API rather than by grepping a source file: the claim is that the
@@ -214,16 +213,6 @@ function jsonRequest(claim: RuntimeClaim): Request {
     body = JSON.stringify(claim.body);
   }
   return new Request(`http://local${claim.path}`, { method: claim.method ?? 'GET', headers, body });
-}
-
-async function dockerIsAvailable(): Promise<boolean> {
-  try {
-    const proc = Bun.spawn(['docker', 'info'], { stdout: 'pipe', stderr: 'pipe' });
-    const exitCode = await proc.exited;
-    return exitCode === 0;
-  } catch {
-    return false;
-  }
 }
 
 function emptyRuntime() {

@@ -66,7 +66,7 @@ function suiteGroups(): string[] {
  * 85% gap accumulated in the first place.
  */
 const DELIBERATELY_EXCLUDED: Record<string, string> = {
-  'tests/integration': 'one test needs a live docker compose stack',
+  'tests/integration': 'docker-backed smokes (compose stack, README hero path) run in the scheduled docker-hero-smoke workflow, not the PR gate',
   'tests/benchmarks': 'timing-sensitive; belongs in a scheduled job, not a PR gate',
   'tests/e2e': '*.e2e.ts needs a browser and is not picked up by bun test',
 };
