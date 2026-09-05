@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { REPO_ROOT } from '../../config.ts';
 import { db, oracleDocuments, sqlite } from '../../db/index.ts';
 import { buildLearningMarkdown } from '../../learn/markdown.ts';
+import { commitRowsOrRemoveFile } from '../../learn/commit-file-write.ts';
 import { DEFAULT_TENANT_ID, tenantIdForWrite } from '../../middleware/tenant.ts';
 import { replaceEntityLinks } from '../../search/entity-ranking.ts';
 import { replaceDocumentPointers } from '../../search/pointer-index.ts';
@@ -89,6 +90,8 @@ export function persistSessionSummary(
   if (fs.existsSync(filePath)) throw new Error(`File already exists: ${identity.filename}`);
   fs.writeFileSync(filePath, content, 'utf-8');
 
+  // Rows in one transaction; on failure the file just written is removed (audit 2026-09-05).
+  commitRowsOrRemoveFile(sqlite, filePath, () => {
   db.insert(oracleDocuments).values({
     id: identity.id,
     tenantId,
@@ -106,6 +109,7 @@ export function persistSessionSummary(
     .run(identity.id, content, concepts.join(' '));
   replaceEntityLinks(sqlite, { documentId: identity.id, tenantId, content, concepts, now: now.getTime() });
   replaceDocumentPointers(sqlite, { documentId: identity.id, tenantId, content, concepts, timestamp: now.getTime() });
+  });
   logLearning(identity.id, cleanPattern, source, concepts);
 
   return { ok: true, source_file: identity.sourceFile, learning_id: identity.id, tenant_id: tenantId };

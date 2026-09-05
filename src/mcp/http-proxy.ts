@@ -99,6 +99,12 @@ function bodyFromMap(entry: RemoteableMcpRestEntry, args: Record<string, unknown
   switch (entry.body) {
     case undefined: return undefined;
     case 'args': return args;
+    case 'learn': {
+      // A proxied seat's learning file must land in the seat's memory tree, not the
+      // owner core's data dir: forward the seat's ORACLE_MEMORY_OWNER_ROOT (audit 2026-09-05).
+      const ownerRoot = process.env.ORACLE_MEMORY_OWNER_ROOT?.trim();
+      return ownerRoot && args.memoryOwnerRoot === undefined ? { ...args, memoryOwnerRoot: ownerRoot } : args;
+    }
     case 'retro-file': return {
       repoRoot: args.repoRoot,
       filePath: args.filePath,

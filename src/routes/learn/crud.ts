@@ -8,6 +8,7 @@ import { currentTenantId, tenantIdForWrite } from '../../middleware/tenant.ts';
 import { replaceEntityLinks } from '../../search/entity-ranking.ts';
 import { replaceDocumentPointers } from '../../search/pointer-index.ts';
 import { findDuplicateLearning } from '../../learn/dedup.ts';
+import { commitRowsOrRemoveFile } from '../../learn/commit-file-write.ts';
 import { conceptsFrom, learningContent, slugFor } from './content.ts';
 import {
   INVALID_LEARNING_ID,
@@ -15,6 +16,8 @@ import {
   learningSourcePath,
   safeLearningId,
   safeLearningSourceFile,
+  resolveLearningRoot,
+  writeLearningFile,
 } from './safety.ts';
 type LearnDoc = typeof oracleDocuments.$inferSelect;
 const oracleFts = sqliteTable('oracle_fts', {
@@ -30,6 +33,8 @@ export type LearnCreateBody = {
   project?: string | null;
   id?: string;
   sourceFile?: string;
+  /** Absolute memory-owner root of the caller; the file is written under it instead of the server root. */
+  memoryOwnerRoot?: string;
 };
 type LearnUpdateBody = Partial<Pick<LearnCreateBody, 'pattern' | 'concepts' | 'origin' | 'project' | 'sourceFile'>> & {
   supersededBy?: string | null;
@@ -44,6 +49,7 @@ const CreateBody = t.Object({
   project: t.Optional(t.Nullable(t.String())),
   id: t.Optional(t.String()),
   sourceFile: t.Optional(t.String()),
+  memoryOwnerRoot: t.Optional(t.String()),
 });
 const UpdateBody = t.Object({
   pattern: t.Optional(t.String()),
@@ -54,19 +60,6 @@ const UpdateBody = t.Object({
   supersededBy: t.Optional(t.Nullable(t.String())),
   supersededReason: t.Optional(t.Nullable(t.String())),
 });
-function writeLearningFile(sourceFile: string, content: string): boolean {
-  const filePath = learningSourcePath(sourceFile);
-  if (!filePath) throw new Error(INVALID_LEARNING_SOURCE_FILE);
-  if (fs.existsSync(filePath)) return false;
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  try {
-    fs.writeFileSync(filePath, content, { encoding: 'utf-8', flag: 'wx' });
-  } catch (error) {
-    if ((error as { code?: string }).code === 'EEXIST') return false;
-    throw error;
-  }
-  return true;
-}
 function ftsContent(id: string): string | null {
   return db.select({ content: oracleFts.content })
     .from(oracleFts)
@@ -77,7 +70,7 @@ function upsertFts(id: string, content: string, concepts: string[]): void {
   db.delete(oracleFts).where(eq(oracleFts.id, id)).run();
   db.insert(oracleFts).values({ id, content, concepts: concepts.join(' ') }).run();
 }
-function nextIdentity(pattern: string, requestedId?: string, requestedSourceFile?: string) {
+function nextIdentity(pattern: string, requestedId?: string, requestedSourceFile?: string, root?: string) {
   if (requestedId) {
     return {
       id: requestedId,
@@ -97,7 +90,7 @@ function nextIdentity(pattern: string, requestedId?: string, requestedSourceFile
       .from(oracleDocuments)
       .where(where)
       .get();
-    const filePath = learningSourcePath(sourceFile);
+    const filePath = learningSourcePath(sourceFile, root);
     if (!existing && filePath && !fs.existsSync(filePath)) {
       return {
         id,
@@ -134,12 +127,16 @@ export function createLearning(body: LearnCreateBody) {
       body: { success: true, duplicate: true, file: duplicate.sourceFile, id: duplicate.id },
     };
   }
-  const identity = nextIdentity(pattern, body.id, requestedSourceFile);
+  let root: string;
+  try { root = resolveLearningRoot(body.memoryOwnerRoot); } catch (error) { return { status: 400, body: { error: (error as Error).message } }; }
+  const identity = nextIdentity(pattern, body.id, requestedSourceFile, root);
   if (rowById(identity.id)) return { status: 409, body: { error: 'Learning already exists' } };
   const content = learningContent(pattern, concepts, body.source);
-  if (!writeLearningFile(identity.sourceFile, content)) {
+  if (!writeLearningFile(identity.sourceFile, content, root)) {
     return { status: 409, body: { error: 'Learning sourceFile already exists' } };
   }
+  // Rows in one transaction; on failure the file just written is removed (no orphan file, no orphan row).
+  commitRowsOrRemoveFile(sqlite, learningSourcePath(identity.sourceFile, root)!, () => {
   db.insert(oracleDocuments).values({
     id: identity.id,
     tenantId,
@@ -165,7 +162,8 @@ export function createLearning(body: LearnCreateBody) {
     createdAt: now,
     project,
   }).run();
-  return { status: 200, body: { success: true, file: identity.sourceFile, id: identity.id } };
+  });
+  return { status: 200, body: { success: true, file: identity.sourceFile, id: identity.id, ...(body.memoryOwnerRoot ? { memoryOwnerRoot: root } : {}) } };
 }
 function updateLearning(id: string, body: LearnUpdateBody) {
   const existing = rowById(id);

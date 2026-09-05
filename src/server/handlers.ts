@@ -20,6 +20,7 @@ import { detectProject } from './project-detect.ts';
 import { coerceConcepts } from '../tools/learn.ts';
 import { createVectorProxy } from './vector-proxy.ts';
 import { buildLearningMarkdown, dateSlug } from '../learn/markdown.ts';
+import { commitRowsOrRemoveFile } from '../learn/commit-file-write.ts';
 import { localNativeVectorDisabledReason, localVectorIndexMissingReason, logLocalVectorDisabled, noteLocalVectorEnabled } from '../vector/cpu-capabilities.ts';
 import { isVectorSectionEnabled } from '../vector/config.ts';
 import { candidatePoolSize } from '../search/retrieve-depth.ts';
@@ -691,6 +692,8 @@ export function persistLearningDoc(opts: {
 
   const sourceFile = `${subdir}/${filename}`;
 
+  // Rows in one transaction; on failure the file just written is removed (audit 2026-09-05).
+  commitRowsOrRemoveFile(sqlite, filePath, () => {
   db.insert(oracleDocuments).values({
     id,
     type: 'learning',
@@ -710,6 +713,7 @@ export function persistLearningDoc(opts: {
     INSERT INTO oracle_fts (id, content, concepts)
     VALUES (?, ?, ?)
   `).run(id, frontmatter, conceptsList.join(' '));
+  });
 
   logLearning(id, pattern, opts.source || 'Oracle Learn', conceptsList);
 

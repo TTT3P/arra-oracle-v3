@@ -12,6 +12,7 @@ import { detectProject } from '../server/project-detect.ts';
 import { tenantIdForWrite } from '../middleware/tenant.ts';
 import { getVectorStoreByModel, getEmbeddingModels } from '../vector/factory.ts';
 import { REPO_ROOT } from '../config.ts';
+import { commitRowsOrRemoveFile } from '../learn/commit-file-write.ts';
 import { buildLearningMarkdown, dateSlug, learningSlug, uniqueTail } from '../learn/markdown.ts';
 import { replaceEntityLinks } from '../search/entity-ranking.ts';
 import { replaceDocumentPointers } from '../search/pointer-index.ts';
@@ -155,6 +156,8 @@ export async function handleLearn(ctx: ToolContext, input: OracleLearnInput): Pr
 
   fs.writeFileSync(filePath, frontmatter, 'utf-8');
 
+  // Rows in one transaction; if any statement fails the file just written is removed (audit 2026-09-05).
+  commitRowsOrRemoveFile(ctx.sqlite, filePath, () => {
   ctx.db.insert(oracleDocuments).values({
     id,
     type: 'learning',
@@ -201,6 +204,7 @@ export async function handleLearn(ctx: ToolContext, input: OracleLearnInput): Pr
   } catch (error) {
     console.error('Failed to log learning:', error);
   }
+  });
 
   // Vector indexing — two paths:
   //   - Default (env unset): inline embed via Ollama. Keeps DB + lancedb in
