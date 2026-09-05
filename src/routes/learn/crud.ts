@@ -8,7 +8,7 @@ import { currentTenantId, tenantIdForWrite } from '../../middleware/tenant.ts';
 import { replaceEntityLinks } from '../../search/entity-ranking.ts';
 import { replaceDocumentPointers } from '../../search/pointer-index.ts';
 import { findDuplicateLearning } from '../../learn/dedup.ts';
-import { commitRowsOrRemoveFile } from '../../learn/commit-file-write.ts';
+import { LEARNING_FILE_OUTSIDE_ROOT, commitRowsOrRemoveFile } from '../../learn/commit-file-write.ts';
 import { conceptsFrom, learningContent, slugFor } from './content.ts';
 import {
   INVALID_LEARNING_ID,
@@ -132,11 +132,14 @@ export function createLearning(body: LearnCreateBody) {
   const identity = nextIdentity(pattern, body.id, requestedSourceFile, root);
   if (rowById(identity.id)) return { status: 409, body: { error: 'Learning already exists' } };
   const content = learningContent(pattern, concepts, body.source);
-  if (!writeLearningFile(identity.sourceFile, content, root)) {
-    return { status: 409, body: { error: 'Learning sourceFile already exists' } };
+  let realFile: string | false;
+  try { realFile = writeLearningFile(identity.sourceFile, content, root); } catch (error) {
+    if ((error as Error).message === LEARNING_FILE_OUTSIDE_ROOT) return { status: 400, body: { error: LEARNING_FILE_OUTSIDE_ROOT } };
+    throw error;
   }
+  if (realFile === false) return { status: 409, body: { error: 'Learning sourceFile already exists' } };
   // Rows in one transaction; on failure the file just written is removed (no orphan file, no orphan row).
-  commitRowsOrRemoveFile(sqlite, learningSourcePath(identity.sourceFile, root)!, () => {
+  commitRowsOrRemoveFile(sqlite, realFile, () => {
   db.insert(oracleDocuments).values({
     id: identity.id,
     tenantId,

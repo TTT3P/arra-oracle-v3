@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import { REPO_ROOT } from '../../config.ts';
 import { db, oracleDocuments, sqlite } from '../../db/index.ts';
 import { buildLearningMarkdown } from '../../learn/markdown.ts';
-import { commitRowsOrRemoveFile } from '../../learn/commit-file-write.ts';
+import { commitRowsOrRemoveFile, createContainedFile } from '../../learn/commit-file-write.ts';
 import { DEFAULT_TENANT_ID, tenantIdForWrite } from '../../middleware/tenant.ts';
 import { replaceEntityLinks } from '../../search/entity-ranking.ts';
 import { replaceDocumentPointers } from '../../search/pointer-index.ts';
@@ -86,12 +86,15 @@ export function persistSessionSummary(
   const existing = db.select({ id: oracleDocuments.id }).from(oracleDocuments)
     .where(eq(oracleDocuments.id, identity.id)).get();
   if (existing) throw new Error(`File already exists: ${identity.filename}`);
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
   if (fs.existsSync(filePath)) throw new Error(`File already exists: ${identity.filename}`);
-  fs.writeFileSync(filePath, content, 'utf-8');
+  let realFile: string;
+  try { realFile = createContainedFile(repoRoot(), filePath, content); } catch (error) {
+    if ((error as { code?: string }).code === 'EEXIST') throw new Error(`File already exists: ${identity.filename}`);
+    throw error;
+  }
 
   // Rows in one transaction; on failure the file just written is removed (audit 2026-09-05).
-  commitRowsOrRemoveFile(sqlite, filePath, () => {
+  commitRowsOrRemoveFile(sqlite, realFile, () => {
   db.insert(oracleDocuments).values({
     id: identity.id,
     tenantId,

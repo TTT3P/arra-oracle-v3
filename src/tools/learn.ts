@@ -12,7 +12,7 @@ import { detectProject } from '../server/project-detect.ts';
 import { tenantIdForWrite } from '../middleware/tenant.ts';
 import { getVectorStoreByModel, getEmbeddingModels } from '../vector/factory.ts';
 import { REPO_ROOT } from '../config.ts';
-import { commitRowsOrRemoveFile } from '../learn/commit-file-write.ts';
+import { commitRowsOrRemoveFile, createContainedFile } from '../learn/commit-file-write.ts';
 import { buildLearningMarkdown, dateSlug, learningSlug, uniqueTail } from '../learn/markdown.ts';
 import { replaceEntityLinks } from '../search/entity-ranking.ts';
 import { replaceDocumentPointers } from '../search/pointer-index.ts';
@@ -126,7 +126,7 @@ export async function handleLearn(ctx: ToolContext, input: OracleLearnInput): Pr
     // the dashboard's /api/file resolves source_file against REPO_ROOT, so
     // writing relative to cwd produces "local file not found" (#557).
     : path.join(REPO_ROOT, 'ψ/memory/learnings');
-  fs.mkdirSync(dir, { recursive: true });
+  const writeRoot = memoryOwnerRoot ?? vaultRoot ?? REPO_ROOT;
 
   // Suffix instead of throwing. Two learnings a day sharing a slug is ordinary —
   // and now guaranteed for non-ASCII patterns, which all fall back to the same
@@ -154,10 +154,11 @@ export async function handleLearn(ctx: ToolContext, input: OracleLearnInput): Pr
     project,
   });
 
-  fs.writeFileSync(filePath, frontmatter, 'utf-8');
+  // Exclusive create inside the real root (no overwrite of a competing file, no symlinked escape).
+  const realFile = createContainedFile(writeRoot, filePath, frontmatter);
 
   // Rows in one transaction; if any statement fails the file just written is removed (audit 2026-09-05).
-  commitRowsOrRemoveFile(ctx.sqlite, filePath, () => {
+  commitRowsOrRemoveFile(ctx.sqlite, realFile, () => {
   ctx.db.insert(oracleDocuments).values({
     id,
     type: 'learning',

@@ -1,5 +1,45 @@
 import fs from 'fs';
+import path from 'path';
 import type { Database } from 'bun:sqlite';
+
+export const LEARNING_FILE_OUTSIDE_ROOT = 'Learning file path escapes the memory root';
+
+const isWithin = (root: string, target: string): boolean => target === root || target.startsWith(root + path.sep);
+
+function deepestExisting(dir: string): string {
+  let current = dir;
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return current;
+}
+
+/**
+ * Create a learning file under `root` with exclusive create (`wx`).
+ *
+ * Containment is checked on REAL paths (Riddler PR#20 S1): the deepest existing
+ * ancestor of the target directory is resolved through symlinks and must lie
+ * inside the resolved root BEFORE any directory is created, so `ψ -> outside`
+ * or `ψ/memory -> outside` can neither receive the file nor get new directories.
+ * `wx` refuses an existing file or symlink at the target (F1), so a competing
+ * writer's file is never overwritten — and therefore never removed by the
+ * rollback, which only ever deletes the path this call returns.
+ * Returns the real path of the created file.
+ */
+export function createContainedFile(root: string, filePath: string, content: string): string {
+  const realRoot = fs.realpathSync(path.resolve(root));
+  const target = path.resolve(filePath);
+  const dir = path.dirname(target);
+  if (!isWithin(realRoot, fs.realpathSync(deepestExisting(dir)))) throw new Error(LEARNING_FILE_OUTSIDE_ROOT);
+  fs.mkdirSync(dir, { recursive: true });
+  const realDir = fs.realpathSync(dir);
+  if (!isWithin(realRoot, realDir)) throw new Error(LEARNING_FILE_OUTSIDE_ROOT);
+  const realTarget = path.join(realDir, path.basename(target));
+  fs.writeFileSync(realTarget, content, { encoding: 'utf-8', flag: 'wx' });
+  return realTarget;
+}
 
 /**
  * Run the row half of a "write the markdown file, then the rows" learning write

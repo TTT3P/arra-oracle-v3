@@ -26,10 +26,12 @@ describe('oracle_learn proxy body', () => {
     expect(req?.body).toEqual({ pattern: 'p', memoryOwnerRoot: '/seat/owner/root' });
   });
 
-  test('an explicit memoryOwnerRoot argument wins over the env', () => {
+  test('a bound seat cannot be redirected by a caller argument; an unbound seat passes it through', () => {
     process.env.ORACLE_MEMORY_OWNER_ROOT = '/seat/owner/root';
-    const req = proxyRequestForTool('oracle_learn', { pattern: 'p', memoryOwnerRoot: '/explicit' });
-    expect(req?.body).toEqual({ pattern: 'p', memoryOwnerRoot: '/explicit' });
+    expect(proxyRequestForTool('oracle_learn', { pattern: 'p', memoryOwnerRoot: '/explicit' })?.body).toEqual({ pattern: 'p', memoryOwnerRoot: '/seat/owner/root' });
+    expect(proxyRequestForTool('oracle_learn', { pattern: 'p', memoryOwnerRoot: '' })?.body).toEqual({ pattern: 'p', memoryOwnerRoot: '/seat/owner/root' });
+    delete process.env.ORACLE_MEMORY_OWNER_ROOT;
+    expect(proxyRequestForTool('oracle_learn', { pattern: 'p', memoryOwnerRoot: '/explicit' })?.body).toEqual({ pattern: 'p', memoryOwnerRoot: '/explicit' });
   });
 
   test('other args-bodied tools do not gain the field', () => {

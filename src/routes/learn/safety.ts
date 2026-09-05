@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { ORACLE_DATA_DIR, REPO_ROOT } from '../../config.ts';
+import { createContainedFile } from '../../learn/commit-file-write.ts';
 
 const repoRoot = () => process.env.ORACLE_REPO_ROOT || REPO_ROOT;
 
@@ -21,29 +22,35 @@ function realpathOrNull(target: string): string | null {
  * must not be the Oracle data dir (TINE 2026-08-19: not a memory tree).
  */
 export function resolveLearningRoot(memoryOwnerRoot?: string | null): string {
-  const requested = memoryOwnerRoot?.trim();
-  if (!requested) return repoRoot();
-  if (!path.isAbsolute(requested) || requested.includes('\0')) throw new Error(INVALID_MEMORY_OWNER_ROOT);
+  // Absent field → legacy server root. An explicitly blank/invalid value is an error, never a fallback.
+  if (memoryOwnerRoot === undefined || memoryOwnerRoot === null) return repoRoot();
+  const requested = memoryOwnerRoot.trim();
+  if (!requested || !path.isAbsolute(requested) || requested.includes('\0')) throw new Error(INVALID_MEMORY_OWNER_ROOT);
   const real = realpathOrNull(requested);
-  if (!real || !fs.statSync(real).isDirectory() || !fs.existsSync(path.join(real, 'ψ'))) throw new Error(INVALID_MEMORY_OWNER_ROOT);
+  if (!real || !fs.statSync(real).isDirectory()) throw new Error(INVALID_MEMORY_OWNER_ROOT);
+  // ψ must be a real directory inside the real root (a `ψ -> elsewhere` link is not a memory tree here).
+  const psi = realpathOrNull(path.join(real, 'ψ'));
+  if (!psi || !fs.statSync(psi).isDirectory() || !(psi === real || psi.startsWith(real + path.sep))) throw new Error(INVALID_MEMORY_OWNER_ROOT);
   const dataDir = realpathOrNull(process.env.ORACLE_DATA_DIR?.trim() || ORACLE_DATA_DIR);
   if (dataDir && real === dataDir) throw new Error(INVALID_MEMORY_OWNER_ROOT);
   return real;
 }
 
-/** Create the learning file (never overwrite). Returns false when it already exists. */
-export function writeLearningFile(sourceFile: string, content: string, root: string = repoRoot()): boolean {
+/**
+ * Create the learning file exclusively inside the real root. Returns the real
+ * path, or false when a file/symlink already exists there. Throws
+ * LEARNING_FILE_OUTSIDE_ROOT when a symlinked ancestor would take it outside.
+ */
+export function writeLearningFile(sourceFile: string, content: string, root: string = repoRoot()): string | false {
   const filePath = learningSourcePath(sourceFile, root);
   if (!filePath) throw new Error(INVALID_LEARNING_SOURCE_FILE);
   if (fs.existsSync(filePath)) return false;
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
   try {
-    fs.writeFileSync(filePath, content, { encoding: 'utf-8', flag: 'wx' });
+    return createContainedFile(root, filePath, content);
   } catch (error) {
     if ((error as { code?: string }).code === 'EEXIST') return false;
     throw error;
   }
-  return true;
 }
 
 export function safeLearningId(id: string): boolean {

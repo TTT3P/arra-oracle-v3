@@ -63,6 +63,26 @@ describe('createLearning — atomic file + rows', () => {
   });
 });
 
+describe('createLearning — containment (Riddler PR#20 S1)', () => {
+  it('refuses a root whose ψ is a symlink out of the root, and a deeper ψ/memory symlink, writing nothing outside', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'arra-learn-atomic-outside-'));
+    const linkRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'arra-learn-atomic-linkroot-'));
+    const deepRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'arra-learn-atomic-deeproot-'));
+    try {
+      fs.symlinkSync(outside, path.join(linkRoot, 'ψ'));
+      const a = createLearning({ pattern: 'escape through psi link', memoryOwnerRoot: linkRoot });
+      expect(a.status).toBe(400);
+      fs.mkdirSync(path.join(deepRoot, 'ψ'));
+      fs.symlinkSync(outside, path.join(deepRoot, 'ψ', 'memory'));
+      const b = createLearning({ pattern: 'escape through psi memory link', memoryOwnerRoot: deepRoot });
+      expect(b.status).toBe(400);
+      expect(fs.readdirSync(outside)).toEqual([]);
+    } finally {
+      for (const d of [outside, linkRoot, deepRoot]) fs.rmSync(d, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('createLearning — memoryOwnerRoot', () => {
   it('writes the file under the caller root, not the server root; row source_file stays relative', () => {
     const before = files(TMP_REPO_ROOT);
@@ -82,7 +102,7 @@ describe('createLearning — memoryOwnerRoot', () => {
     fs.mkdirSync(path.join(TMP_DATA_DIR, 'ψ'), { recursive: true });
     const before = { repo: files(TMP_REPO_ROOT), owner: files(OWNER_ROOT), data: files(TMP_DATA_DIR) };
     try {
-      for (const root of [path.join(os.tmpdir(), 'does-not-exist-arra'), bare, 'relative/root', TMP_DATA_DIR]) {
+      for (const root of [path.join(os.tmpdir(), 'does-not-exist-arra'), bare, 'relative/root', TMP_DATA_DIR, '', '   ']) {
         const res = createLearning({ pattern: `refused root ${root}`, memoryOwnerRoot: root });
         expect(res.status).toBe(400);
         expect((res.body as { error: string }).error).toBe('Invalid memoryOwnerRoot');

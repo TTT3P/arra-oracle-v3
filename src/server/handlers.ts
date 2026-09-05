@@ -20,7 +20,7 @@ import { detectProject } from './project-detect.ts';
 import { coerceConcepts } from '../tools/learn.ts';
 import { createVectorProxy } from './vector-proxy.ts';
 import { buildLearningMarkdown, dateSlug } from '../learn/markdown.ts';
-import { commitRowsOrRemoveFile } from '../learn/commit-file-write.ts';
+import { commitRowsOrRemoveFile, createContainedFile } from '../learn/commit-file-write.ts';
 import { localNativeVectorDisabledReason, localVectorIndexMissingReason, logLocalVectorDisabled, noteLocalVectorEnabled } from '../vector/cpu-capabilities.ts';
 import { isVectorSectionEnabled } from '../vector/config.ts';
 import { candidatePoolSize } from '../search/retrieve-depth.ts';
@@ -668,7 +668,6 @@ export function persistLearningDoc(opts: {
   const now = new Date();
 
   const dir = path.join(currentRepoRoot(), subdir);
-  fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, filename);
 
   if (fs.existsSync(filePath)) {
@@ -688,12 +687,17 @@ export function persistLearningDoc(opts: {
     footer: opts.footer,
   });
 
-  fs.writeFileSync(filePath, frontmatter, 'utf-8');
+  // Exclusive create inside the real root: a competing file is never overwritten (and so never removed on rollback).
+  let realFile: string;
+  try { realFile = createContainedFile(currentRepoRoot(), filePath, frontmatter); } catch (error) {
+    if ((error as { code?: string }).code === 'EEXIST') throw new Error(`File already exists: ${filename}`);
+    throw error;
+  }
 
   const sourceFile = `${subdir}/${filename}`;
 
   // Rows in one transaction; on failure the file just written is removed (audit 2026-09-05).
-  commitRowsOrRemoveFile(sqlite, filePath, () => {
+  commitRowsOrRemoveFile(sqlite, realFile, () => {
   db.insert(oracleDocuments).values({
     id,
     type: 'learning',
