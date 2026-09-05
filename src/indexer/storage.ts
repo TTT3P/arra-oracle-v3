@@ -16,6 +16,12 @@ import { replaceDocumentPointersBulk, type PointerInput } from '../search/pointe
 import type { VectorStoreAdapter } from '../vector/types.ts';
 import type { OracleDocument } from '../types.ts';
 
+/** The synchronous transaction handle `storeDocuments` runs in. `opts.afterStore` receives it so a
+ * caller can publish follow-up rows (e.g. supersede the stored files' legacy rows) in the SAME
+ * transaction — atomic with the store, and never a write transaction held across an `await`.
+ * Undefined (the default) leaves every existing caller's behavior unchanged. */
+export type StoreTx = Parameters<Parameters<BunSQLiteDatabase<typeof schema>['transaction']>[0]>[0];
+
 export const oracleFts = sqliteTable('oracle_fts', {
   id: text('id').notNull(),
   content: text('content').notNull(),
@@ -32,7 +38,7 @@ export async function storeDocuments(
   vectorClient: VectorStoreAdapter | null,
   project: string | null,
   documents: OracleDocument[],
-  opts: { createdBy?: string; tenantId?: string; insertOnly?: boolean } = {}
+  opts: { createdBy?: string; tenantId?: string; insertOnly?: boolean; afterStore?: (tx: StoreTx) => void } = {}
 ): Promise<void> {
   const now = Date.now();
   const tenantId = opts.tenantId ?? tenantIdForWrite();
@@ -137,6 +143,7 @@ export async function storeDocuments(
     }
     // Flush all pointer memberships in a single tenant scan (see pointerInputs comment above).
     replaceDocumentPointersBulk(sqlite, tenantId, pointerInputs);
+    opts.afterStore?.(tx);
   });
 
   // Batch insert to vector store in chunks of 100 (skip if no client)
