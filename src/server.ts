@@ -2,7 +2,7 @@ import { Elysia } from 'elysia';
 import { join } from 'node:path';
 import { swagger } from '@elysiajs/swagger';
 import { configure, writePidFile, removePidFile } from './process-manager/index.ts';
-import { PORT, ORACLE_DATA_DIR, VECTOR_URL } from './config.ts';
+import { PORT, ORACLE_DATA_DIR, VECTOR_URL, resolveBindHost } from './config.ts';
 import { MCP_SERVER_NAME } from './const.ts';
 import { db, sqlite, closeDb, settings } from './db/index.ts';
 import { markInterruptedIndexingOnStartup } from './indexer/status.ts';
@@ -82,7 +82,7 @@ import { simpleModeResponse } from './simple-mode.ts';
 import pkg from '../package.json' with { type: 'json' };
 
 type UnifiedRuntime = Awaited<ReturnType<typeof loadUnifiedPlugins>>;
-type ServerSpec = { port: number; fetch(request: Request): Response | Promise<Response> };
+type ServerSpec = { hostname: string; port: number; fetch(request: Request): Response | Promise<Response> };
 type ElysiaApp = Elysia<any, any, any, any, any, any, any>;
 type RouteModule = Parameters<ElysiaApp['use']>[0];
 export interface StartServerOptions { writePidFile?: boolean }
@@ -243,7 +243,7 @@ export async function createStartedApp(options: StartServerOptions = {}): Promis
   await seedMenus(app, unifiedPlugins);
   await announceStartup(app, startupConfig);
   const serverFetch = createRequestTimeoutFetch(createRequestDedupFetch(createApiVersionedFetch(createTenantFetch(createDbContextFetch((request: Request) => app.fetch(request))))));
-  return { port: Number(PORT), fetch: (request) => drainingResponseFor(request) ?? trackRequest(() => serverFetch(request)) };
+  return { hostname: resolveBindHost(), port: Number(PORT), fetch: (request) => drainingResponseFor(request) ?? trackRequest(() => serverFetch(request)) };
 }
 
 function resetIndexerStatus(): void {
