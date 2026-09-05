@@ -119,23 +119,44 @@ launchd-managed process and must not be used as a restart path while launchd own
   A session that cannot list this tool is stale and must restart before claiming
   the retrospective complete. The HTTP calls below are operator surfaces, not
   substitutes for an agent missing its MCP tool.
-- ⚠️ **`scope=retros` on a large root is UNSAFE until the pointer-index fix (PR-B
-  slice b) ships** — incident ORACLE-REINDEX-HANDLER-JAM-2026-09-04: a retros
-  run over the canonical root (597 files / 4,961 docs) CPU-starved the core's
-  event loop for 35+ min (76% CPU, ZERO WAL writes — per-doc pointer-index
-  full-table scans), wedging every HTTP/MCP handler fleet-wide; contained by
-  `launchctl kickstart -k` with zero index loss (nothing had committed). Use
-  bounded `scope=retro-file` per file (4–13 s each, proven) for targeted
-  gaps; a full retros pass needs an operator watching liveness and a plan to
-  abort. Receipt: `oracle-maint-oracle/ψ/findings/2026-09-04_missing678-reindex-receipt.md`.
-- Retros-only reindex (non-pruning, released; re-executed 2026-08-17 — see the
-  hold above before running it over a large root):
+- ⚠️ **`scope=retros` on a large root is still HELD (live proof pending)** — incident
+  ORACLE-REINDEX-HANDLER-JAM-2026-09-04: a retros run over the canonical root (597 files / 4,961 docs)
+  CPU-starved the core's event loop for 35+ min (76% CPU, ZERO WAL writes — per-doc pointer-index
+  full-table scans), wedging every HTTP/MCP handler fleet-wide; contained by `launchctl kickstart -k`
+  with zero index loss. Since then two fixes are LIVE: PR-B slice (b) `b8c82599` (one pointer scan per
+  store batch) and slice (d) `f9c13b07` (PR#15: file-aligned adaptive batches, one transaction per
+  batch with the supersede inside it, durable `indexing_status` marker per batch, event-loop yield
+  between batches). The 2026-09-05 09:47 live attempt **committed per batch and reclaimed memory (no
+  wedge, zero loss, no mixed generation)** but each batch still blocked the loop 3–8 s (~3 docs/s vs
+  30 docs/s in the offline canary — cause under diagnosis, suspected lock waits from concurrent fleet
+  writes), so the hold stays until a supervised run passes with `/api/health/live` answering
+  throughout. Use bounded `scope=retro-file` per file (4–13 s each, proven) for targeted gaps.
+  Receipts: `oracle-maint-oracle/ψ/findings/2026-09-04_missing678-reindex-receipt.md`,
+  `…/2026-09-05_pr15-sliced-deploy-receipt.md`.
+- Retros-only reindex (non-pruning, released; last executed 2026-09-05 under the hold above —
+  supervised, contained). **Start it with `wait:false` and follow the marker**: every request is
+  capped by the server-wide `ARRA_REQUEST_TIMEOUT_MS` (default 30 000 ms, `src/middleware/timeout.ts`),
+  so `wait:true` returns **HTTP 408 after 30 s while the run keeps going** — proven 2026-09-05 09:48.
+  The run commits per batch and writes `indexing_status` id=1 after each commit (PR#15), which is the
+  supervision surface:
   ```sh
   curl -s -X POST http://127.0.0.1:47778/api/v1/indexer/reindex \
     -H 'content-type: application/json' \
-    -d '{"repoRoot":"/Users/trirongyinwichapoon/tt3p/agent-hub/orchestrator-vnext","scope":"retros","wait":true}'
-  # expect: {"success":true,…,"status":"complete","ok":true,…}
+    -d '{"repoRoot":"/Users/trirongyinwichapoon/tt3p/agent-hub/orchestrator-vnext","scope":"retros","wait":false}'
+  # expect: {"ok":true,"jobId":"reindex-…","status":"started",…}   (409 if a job is already running)
+  # follow progress (SSE; one line per tick) — status running|idle, current/total, docsPerSec, error:
+  curl -s -N --max-time 5 http://127.0.0.1:47778/api/v1/indexer/progress
+  # or the row itself:
+  sqlite3 -readonly ~/.arra-oracle-v2/oracle.db \
+    "SELECT is_indexing, progress_current, progress_total, completed_at, error FROM indexing_status WHERE id=1;"
+  # done = is_indexing 0 AND completed_at set AND error NULL. is_indexing 1 + error + completed_at NULL
+  # = a batch failed (earlier batches are committed; a rerun converges, never a mixed generation).
+  # supervise liveness in parallel (must answer within the fleet's 2 s abort, every time):
+  curl -s -m 2 -o /dev/null -w '%{http_code} %{time_total}\n' http://127.0.0.1:47778/api/health/live
   ```
+  To stop a run: `launchctl kickstart -k gui/$(id -u)/com.tt3p.arra-oracle` (section 3) — the in-flight
+  batch rolls back, committed batches stay; NOTE startup currently blanks `is_indexing` (PR#16 keeps the
+  interrupted marker visible once merged).
   `repoRoot` is REQUIRED here: omitting it resolves to the server's own repo checkout, not the canonical source root, and indexes 0 documents.
 - **Ingest is hybrid, not one path** (ORA-SHARED-20260820-06): `oracle_learn`'s
   default write embeds into the vector store **inline**, bypassing
