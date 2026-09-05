@@ -26,7 +26,8 @@ const REINDEX_REASON = 'superseded by indexer reindex';
  *    document's "before" content was the whole FTS table concatenated. `changedDocumentIds` then
  *    saw every document as changed (pinned by tests/indexer/snapshot-set-based.test.ts).
  * 2. `oracle_fts.id` is UNINDEXED (FTS5), so even the intended query scans the whole FTS table
- *    once per active document: O(docs × fts_rows), 88 s for 10,719 docs on a live copy.
+ *    once per active document: O(docs × fts_rows) — 23.2 s for the 2,513 active indexer docs of a
+ *    live copy (intended correlated baseline, not the defective deployed query).
  * This form scans `oracle_fts` exactly once into a temp table and groups by id (0.16 s on the same
  * copy). `ORDER BY r` (the FTS rowid) inside GROUP_CONCAT pins the concatenation to FTS scan order,
  * including duplicate rows for one id, so the result equals the intended correlated query byte for

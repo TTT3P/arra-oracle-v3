@@ -136,12 +136,18 @@ launchd-managed process and must not be used as a restart path while launchd own
   Cause found 2026-09-05 (`…/2026-09-05_pr15-live-10x-diagnosis-fts-scan.md`): `oracle_fts.id` is
   UNINDEXED, so every `WHERE id = ?` on the FTS table is a full scan, and the 0032 concepts-sync trigger
   fired a second scan per chunk on every upsert. **Slice (g-min)** (migration `0042`, this checkout):
-  the trigger fires only when `concepts` changes (per-chunk cost ≈ halved: 10× FTS canary 1.4–1.6 s/file
-  with `/health/live` timeouts → 0.8 s/file, 0 timeouts) and the full-reindex snapshot
-  (`snapshotActiveIndexerDocs`, `scope=all` path only, not retros) scans FTS once instead of per document
-  (23 s → 0.16 s on a live copy; it also returned every document the whole FTS table before, so every
-  document counted as changed). This is ~2× on the retros/retro-file path, **not the 40×**: the by-id
-  delete per chunk remains until slice (g-fast), which needs the single-writer FTS topology first.
+  the trigger fires only when `concepts` changes, and the full-reindex snapshot
+  (`snapshotActiveIndexerDocs`, `scope=all` path only, not retros) scans FTS once instead of per document.
+  Canary on a 10× FTS copy (shared control node, load 4–17): three lower-load runs 0.80–0.84 s/file with
+  0 `/health/live` timeouts, plus one loaded run (load 13) at 1.35 s/file with 1 timeout — recorded, not
+  dropped; negative control (0032 trigger form restored on the copy) 1.44 / 1.61 s/file with 1–2 timeouts.
+  Effect: **roughly 1.6× over all runs, 1.9× over the lower-load runs; not a zero-timeout guarantee.**
+  Snapshot: **23.2 s → 0.16 s against the intended correlated query, 2,513 active indexer docs, full
+  reindex only** — the query deployed before 0042 was not that baseline: it rendered `WHERE "id" = "id"`
+  and returned every document the whole FTS table, so every document counted as changed. This is not the
+  40×: the by-id delete per chunk remains until slice (g-fast), which needs the single-writer FTS topology
+  first. **Live gate still unproven**: the 5 measured files via `scope=retro-file` ≤ 2 s each with
+  `/health/live` < 2 s throughout is the R1-window acceptance; HOLD stays until then.
 - Retros-only reindex (non-pruning, released; last executed 2026-09-05 under the hold above —
   supervised, contained). **Start it with `wait:false` and follow the marker**: every request is
   capped by the server-wide `ARRA_REQUEST_TIMEOUT_MS` (default 30 000 ms, `src/middleware/timeout.ts`),
