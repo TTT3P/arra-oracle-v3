@@ -14,9 +14,6 @@ import { handleSearch } from '../search.ts';
 import { handleStats } from '../stats.ts';
 import { handleSupersede, runSupersede } from '../supersede.ts';
 
-
-import './warm-read-deps.ts'; // cold-start guard for the first oracle_read test (see that file)
-
 const tempRoots: string[] = [];
 
 function tempRoot(prefix: string) {

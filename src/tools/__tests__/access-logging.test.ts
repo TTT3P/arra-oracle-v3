@@ -22,9 +22,6 @@ const { handleSearch } = await import('../search.ts');
 const { handleRead } = await import('../read.ts');
 import type { ToolContext } from '../types.ts';
 
-
-import './warm-read-deps.ts'; // cold-start guard for the first oracle_read test (see that file)
-
 const { sqlite, db } = createDatabase(dbPath);
 const now = Date.now();
 db.insert(oracleDocuments).values({
