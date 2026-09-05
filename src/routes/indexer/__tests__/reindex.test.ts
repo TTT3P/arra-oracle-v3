@@ -192,4 +192,63 @@ describe('POST /indexer/reindex', () => {
     expect(lines[0]).toContain('ua="-" xff_fp="-" claimed_seat="-" cid="-"');
     expect(lines[1]).toContain('event=complete');
   });
+  it('scope=learnings dispatches only the learnings runner with the explicit root and dryRun flag', async () => {
+    const runFull = mock(async () => ({ ok: true as const, repoRoot: '/oracle', append: false }));
+    const runRetros = mock(async (repoRoot: string) => ({ ok: true as const, repoRoot, documents: 0 }));
+    const runRetroFile = mock(async (repoRoot: string, filePath: string) => ({ ok: true as const, repoRoot, filePath, documents: 0 }));
+    const runLearnings = mock(async ({ repoRoot, dryRun }: { repoRoot: string; dryRun?: boolean }) => ({
+      ok: true as const, scope: 'learnings' as const, repoRoot, dryRun: dryRun === true, files: 2, documents: 2, chunks: 2, superseded: 0,
+      vectorJobs: { queued: 0, skipped: 0, failed: 0 },
+    }));
+    const app = new Elysia().use(createReindexRoute({ resolveRepoRoot: (r) => r ?? '/fallback', runFull, runRetros, runRetroFile, runLearnings }));
+
+    const res = await post(app, { scope: 'learnings', repoRoot: '/croo', dryRun: true });
+    const body = await res.json() as any;
+
+    expect(res.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.scope).toBe('learnings');
+    expect(body.dryRun).toBe(true);
+    expect(runLearnings).toHaveBeenCalledTimes(1);
+    expect(runLearnings).toHaveBeenCalledWith({ repoRoot: '/croo', dryRun: true });
+    expect(runFull).not.toHaveBeenCalled();
+    expect(runRetros).not.toHaveBeenCalled();
+    expect(runRetroFile).not.toHaveBeenCalled();
+  });
+
+  it('scope=learnings without an explicit repoRoot fails closed and runs nothing', async () => {
+    const runFull = mock(async () => ({ ok: true as const, repoRoot: '/oracle', append: false }));
+    const runRetros = mock(async (repoRoot: string) => ({ ok: true as const, repoRoot, documents: 0 }));
+    const runRetroFile = mock(async (repoRoot: string, filePath: string) => ({ ok: true as const, repoRoot, filePath, documents: 0 }));
+    const runLearnings = mock(async ({ repoRoot }: { repoRoot: string }) => ({ ok: true as const, repoRoot }));
+    const app = new Elysia().use(createReindexRoute({ resolveRepoRoot: () => '/fallback-root', runFull, runRetros, runRetroFile, runLearnings }));
+
+    const res = await post(app, { scope: 'learnings' });
+    const body = await res.json() as any;
+
+    expect(body.ok).toBe(false);
+    expect(body.status).toBe('error');
+    expect(body.error).toContain('repoRoot is required for scope=learnings');
+    expect(runLearnings).not.toHaveBeenCalled();
+    expect(runFull).not.toHaveBeenCalled();
+    expect(runRetros).not.toHaveBeenCalled();
+  });
+  it('rejects dryRun for any scope other than learnings before running anything', async () => {
+    const runFull = mock(async () => ({ ok: true as const, repoRoot: '/oracle', append: false }));
+    const runRetros = mock(async (repoRoot: string) => ({ ok: true as const, repoRoot, documents: 0 }));
+    const runRetroFile = mock(async (repoRoot: string, filePath: string) => ({ ok: true as const, repoRoot, filePath, documents: 0 }));
+    const runLearnings = mock(async ({ repoRoot }: { repoRoot: string }) => ({ ok: true as const, repoRoot }));
+    const log = mock((_line: string) => {});
+    const app = new Elysia().use(createReindexRoute({ resolveRepoRoot: () => '/oracle', runFull, runRetros, runRetroFile, runLearnings, log }));
+    for (const body of [{ dryRun: true }, { scope: 'all', dryRun: true }, { scope: 'retros', dryRun: true }, { scope: 'retro-file', filePath: '/oracle/ψ/memory/retrospectives/x.md', dryRun: true }]) {
+      const res = await post(app, body);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as any).error).toContain('dryRun is only supported with scope=learnings');
+    }
+    expect(runFull).not.toHaveBeenCalled();
+    expect(runRetros).not.toHaveBeenCalled();
+    expect(runRetroFile).not.toHaveBeenCalled();
+    expect(runLearnings).not.toHaveBeenCalled();
+    expect(log.mock.calls.some(([line]) => String(line).includes('event=start'))).toBe(false);
+  });
 });

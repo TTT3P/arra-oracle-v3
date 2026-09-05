@@ -39,6 +39,7 @@ import { oracleFts, storeDocuments } from './storage.ts';
 import { chunkDocumentsForIndexing } from './chunker.ts';
 import { buildDeletePlan, printDeletePlan, resolvePruneAuthority } from './prune-authority.ts';
 import { removeDocumentPointers } from '../search/pointer-index.ts';
+import { runLearningsPass, type LearningsPassOptions, type LearningsPassResult } from './learnings-pass.ts';
 
 export interface IndexOptions {
   append?: boolean;
@@ -207,6 +208,16 @@ export class OracleIndexer {
     console.log(`Queued ${vectorJobs.queued} vector job(s); skipped ${vectorJobs.skipped}`);
     if (vectorJobs.failed > 0) console.warn(`Failed to queue ${vectorJobs.failed} vector job(s); FTS5 index remains current`);
     console.log('Indexing complete!');
+  }
+
+  /**
+   * Learnings-only pass (`scope=learnings`): ψ/memory/learnings under this root,
+   * same sink as index(), no other source type, no prune. See ./learnings-pass.ts.
+   */
+  async indexLearnings(options: LearningsPassOptions = {}): Promise<LearningsPassResult> {
+    return runLearningsPass({
+      sqlite: this.sqlite, db: this.db, config: this.config, project: this.project, seenContentHashes: this.seenContentHashes,
+    }, options);
   }
 
   /** Close database connections */

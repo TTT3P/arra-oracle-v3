@@ -8,6 +8,7 @@ import { DB_PATH, CHROMADB_DIR } from '../config.ts';
 import { getVaultPsiRoot } from '../vault/handler.ts';
 import type { IndexerConfig } from '../types.ts';
 import { OracleIndexer } from './index.ts';
+import { runOracleReindexLearnings } from './runner.ts';
 
 // Prefer vault repo for centralized indexing, fall back to local psi/ detection
 const scriptDir = import.meta.dirname || path.dirname(new URL(import.meta.url).pathname);
@@ -49,7 +50,14 @@ export function createIndexerConfig(repoRootOverride = process.env.ORACLE_REPO_R
   };
 }
 
-export type IndexerCliOptions = { repoRoot?: string; readOnly: boolean; help: boolean; confirmDelete?: number };
+export type IndexerCliScope = 'all' | 'learnings';
+export type IndexerCliOptions = { repoRoot?: string; readOnly: boolean; help: boolean; confirmDelete?: number; scope: IndexerCliScope; dryRun: boolean };
+
+function parseScopeValue(raw: string | undefined): IndexerCliScope {
+  const value = raw?.trim();
+  if (value === 'all' || value === 'learnings') return value;
+  throw new Error("--scope must be 'all' or 'learnings' (retros/retro-file are HTTP-only, see RUNBOOK §4)");
+}
 
 function parseConfirmDeleteValue(raw: string | undefined): number {
   const value = raw?.trim();
@@ -61,7 +69,7 @@ function parseConfirmDeleteValue(raw: string | undefined): number {
 }
 
 export function parseIndexerCliArgs(args: string[]): IndexerCliOptions {
-  const options: IndexerCliOptions = { readOnly: false, help: false };
+  const options: IndexerCliOptions = { readOnly: false, help: false, scope: 'all', dryRun: false };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--help' || arg === '-h') options.help = true;
@@ -74,6 +82,12 @@ export function parseIndexerCliArgs(args: string[]): IndexerCliOptions {
       const value = arg.slice('--repo-root='.length).trim();
       if (!value) throw new Error('--repo-root requires a path');
       options.repoRoot = value;
+    } else if (arg === '--scope') {
+      options.scope = parseScopeValue(args[++i]);
+    } else if (arg?.startsWith('--scope=')) {
+      options.scope = parseScopeValue(arg.slice('--scope='.length));
+    } else if (arg === '--dry-run') {
+      options.dryRun = true;
     } else if (arg === '--confirm-delete') {
       options.confirmDelete = parseConfirmDeleteValue(args[++i]);
     } else if (arg?.startsWith('--confirm-delete=')) {
@@ -82,11 +96,16 @@ export function parseIndexerCliArgs(args: string[]): IndexerCliOptions {
       throw new Error(`unknown index option: ${arg}`);
     }
   }
+  if (options.scope === 'learnings' && !options.repoRoot) throw new Error('--scope learnings requires --repo-root');
+  if (options.dryRun && options.scope !== 'learnings') throw new Error('--dry-run is only supported with --scope learnings');
+  if (options.scope === 'learnings' && options.confirmDelete !== undefined) throw new Error('--confirm-delete is not accepted with --scope learnings (this scope never prunes)');
   return options;
 }
 
 function printUsage(): void {
-  console.log('Usage: bun src/indexer/cli.ts [--repo-root <path>] [--read-only] [--confirm-delete <n>]');
+  console.log('Usage: bun src/indexer/cli.ts [--repo-root <path>] [--read-only] [--confirm-delete <n>] [--scope all|learnings] [--dry-run]');
+  console.log('  --scope learnings       Index ONLY ψ/memory/learnings under --repo-root (required); never reads retros, never prunes');
+  console.log('  --dry-run               With --scope learnings: list candidate files, write nothing');
   console.log('  --repo-root <path>      Index a specific repository root');
   console.log('  --read-only             Open vector sidecar dependencies in read-only mode');
   console.log('  --confirm-delete <n>    Execute destructive prune only if planned count === n AND the');
@@ -107,6 +126,11 @@ if (import.meta.main) {
     process.exit(0);
   }
   if (options.readOnly) process.env.ORACLE_VECTOR_READONLY = '1';
+  if (options.scope === 'learnings') {
+    runOracleReindexLearnings({ repoRoot: options.repoRoot, dryRun: options.dryRun })
+      .then((result) => { console.log(JSON.stringify(result, null, 2)); })
+      .catch((err) => { console.error('Learnings indexing failed:', err instanceof Error ? err.message : err); process.exit(1); });
+  } else {
   const indexer = new OracleIndexer(createIndexerConfig(options.repoRoot));
 
   indexer.index({ confirmDelete: options.confirmDelete })
@@ -119,4 +143,5 @@ if (import.meta.main) {
       await indexer.close();
       process.exit(1);
     });
+  }
 }

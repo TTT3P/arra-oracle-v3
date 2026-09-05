@@ -12,6 +12,7 @@ import { DB_PATH, CHROMADB_DIR } from '../config.ts';
 import { getVaultPsiRoot } from '../vault/handler.ts';
 import type { IndexerConfig } from '../types.ts';
 import { OracleIndexer } from './index.ts';
+import { collectLearningsCandidates, validateLearningsRoot, type LearningsPassOptions, type LearningsPassResult } from './learnings-pass.ts';
 
 const scriptDir = import.meta.dirname || path.dirname(new URL(import.meta.url).pathname);
 const projectRoot = path.resolve(scriptDir, '..', '..');
@@ -58,6 +59,30 @@ export function createIndexerConfig(repoRoot: string): IndexerConfig {
         : undefined,
     },
   };
+}
+
+/**
+ * `scope=learnings`: explicit, validated root; only ψ/memory/learnings is read
+ * and stored; nothing is pruned. Shared by the HTTP route and the CLI.
+ */
+export async function runOracleReindexLearnings(opts: { repoRoot?: string | null } & LearningsPassOptions): Promise<LearningsPassResult> {
+  const repoRoot = validateLearningsRoot(opts.repoRoot);
+  const config = createIndexerConfig(repoRoot);
+  if (opts.dryRun === true) {
+    // Read-only end to end: no OracleIndexer, so no database is created, opened or migrated (Riddler PR#21 #2).
+    const c = collectLearningsCandidates(config);
+    return {
+      ok: true, scope: 'learnings', repoRoot, dryRun: true, files: c.sourceFiles.length, documents: c.documents.length,
+      chunks: c.chunks.length, superseded: 0, vectorJobs: { queued: 0, skipped: 0, failed: 0 }, skippedOutsideTree: c.skippedOutsideTree,
+      sourceFiles: c.sourceFiles,
+    };
+  }
+  const indexer = new OracleIndexer(config);
+  try {
+    return await indexer.indexLearnings({ dryRun: opts.dryRun });
+  } finally {
+    await indexer.close();
+  }
 }
 
 export async function runOracleReindex(opts: { repoRoot?: string | null; append?: boolean; confirmDelete?: number } = {}) {
