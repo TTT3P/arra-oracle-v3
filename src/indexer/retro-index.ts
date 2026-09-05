@@ -21,44 +21,89 @@ import { parseRetroFile } from './parser.ts';
 import { storeDocuments } from './storage.ts';
 import { chunkDocumentsForIndexing } from './chunker.ts';
 import { supersedeReplacedSourceDocs } from './reindex-state.ts';
-import type { OracleDocument } from '../types.ts';
+import { setIndexingStatus } from './status.ts';
+import {
+  DEFAULT_INITIAL_BATCH, DEFAULT_MAX_BATCH, DEFAULT_TARGET_MS,
+  groupBySourceFile, nextBatchTarget, takeFileAlignedBatch, type AdaptiveSizing,
+} from './retro-batch.ts';
+import type { IndexerConfig, OracleDocument } from '../types.ts';
 
-/** Documents per store transaction. A whole-root retros pass over the canonical root is otherwise
- * ONE giant `storeDocuments` transaction that holds the single Bun event loop for ~2 min and
- * buffers the entire change set in memory — the slice-b live wedge (2026-09-05). Batching bounds
- * both. Default sized from the proven per-file cost (RUNBOOK §4: retro-file 4–13 s); override with
- * ORACLE_RETROS_BATCH_SIZE. */
-const DEFAULT_RETROS_BATCH_SIZE = 250;
-function retrosBatchSize(): number {
-  const n = Number(process.env.ORACLE_RETROS_BATCH_SIZE);
-  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : DEFAULT_RETROS_BATCH_SIZE;
+/**
+ * Batching (PR-B slice d). A whole-root retros pass over the canonical root was ONE giant
+ * `storeDocuments` transaction: it held the single Bun event loop for ~2 min and buffered the entire
+ * change set — the slice-b live wedge (2026-09-05). Each batch here is its own transaction, closed
+ * only at a source-file boundary, followed by its own supersede pass and a real event-loop yield.
+ *
+ * Batch size is adaptive by default (see `retro-batch.ts`): it steers each batch's wall time toward
+ * `targetMs` (default 500 ms, a quarter of the fleet's 2 s liveness abort). `ORACLE_RETROS_BATCH_SIZE` or an
+ * explicit `batchSize` pins a fixed size instead (adaptive off) — the negative-control shape.
+ */
+export interface RetrosIndexOptions {
+  /** Fixed docs per batch (disables adaptive sizing). */
+  batchSize?: number;
+  /** Adaptive wall-time goal per batch, ms. */
+  targetMs?: number;
+  initialBatchSize?: number;
+  maxBatchSize?: number;
+  /** Observability hook, called after each batch has committed and superseded. */
+  onBatch?: (info: RetrosBatchInfo) => void;
+}
+
+export interface RetrosBatchInfo {
+  batch: number;
+  files: number;
+  /** Relative source files committed by this batch (names only, never content). */
+  sourceFiles: string[];
+  docs: number;
+  chunks: number;
+  superseded: number;
+  wallMs: number;
+  done: number;
+  total: number;
+  nextTarget: number;
+}
+
+/** Idle gap between batches so pending I/O and due timers both get a turn. */
+const BATCH_YIELD_MS = 10;
+
+function envNumber(name: string): number | undefined {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : undefined;
 }
 
 export async function indexRetrospectives(
   repoRoot: string,
   dbPath: string = process.env.ORACLE_DB_PATH || DB_PATH,
-  batchSize: number = retrosBatchSize(),
+  options: RetrosIndexOptions | number = {},
 ) {
+  const opts: RetrosIndexOptions = typeof options === 'number' ? { batchSize: options } : options;
+  const fixedSize = opts.batchSize ?? envNumber('ORACLE_RETROS_BATCH_SIZE');
+  const sizing: AdaptiveSizing = {
+    targetMs: opts.targetMs ?? envNumber('ORACLE_RETROS_BATCH_TARGET_MS') ?? DEFAULT_TARGET_MS,
+    min: 1,
+    max: opts.maxBatchSize ?? DEFAULT_MAX_BATCH,
+  };
   const resolvedRoot = path.resolve(repoRoot);
-  const seenContentHashes = new Set<string>();
-  const documents = collectDocuments({
-    config: {
-      repoRoot: resolvedRoot,
-      dbPath,
-      chromaPath: '',
-      sourcePaths: {
-        resonance: 'ψ/memory/resonance',
-        learnings: 'ψ/memory/learnings',
-        retrospectives: 'ψ/memory/retrospectives',
-        distillations: 'ψ/memory/distillations',
-        learn: 'ψ/learn',
-      },
+  const config: IndexerConfig = {
+    repoRoot: resolvedRoot,
+    dbPath,
+    chromaPath: '',
+    sourcePaths: {
+      resonance: 'ψ/memory/resonance',
+      learnings: 'ψ/memory/learnings',
+      retrospectives: 'ψ/memory/retrospectives',
+      distillations: 'ψ/memory/distillations',
+      learn: 'ψ/learn',
     },
-    seenContentHashes,
-    subdir: 'retrospectives',
-    parseFn: parseRetroFile,
-    label: 'retrospective',
+  };
+  const documents = collectDocuments({
+    config, seenContentHashes: new Set<string>(), subdir: 'retrospectives', parseFn: parseRetroFile, label: 'retrospective',
   });
+  const total = documents.length;
+  // Whole-file groups in a queue the planner drains; processed groups are released for GC so the
+  // JS live set plateaus after the initial load instead of holding every chunk to the end.
+  const queue: Array<OracleDocument[] | undefined> = groupBySourceFile(documents);
+  documents.length = 0;
 
   const { sqlite, db } = createDatabase(dbPath);
   // Capture the tenant once and ALWAYS pass it — activeTenantId() falls back
@@ -66,33 +111,60 @@ export async function indexRetrospectives(
   // of widening the supersede across every tenant sharing the source path.
   const tenantId = activeTenantId();
   const project = detectProject(resolvedRoot);
-  const size = Math.max(1, Math.trunc(batchSize));
-  // Chunk ids accumulate for the response and for one supersede pass at the end (batching supersede
-  // per batch would mis-fire when a source file's chunks straddle a batch boundary).
-  const chunked: OracleDocument[] = [];
+  const cursor = { next: 0 };
+  let target = fixedSize ?? Math.min(opts.initialBatchSize ?? DEFAULT_INITIAL_BATCH, sizing.max);
+  const ids: string[] = []; // ids only — never the chunk content
   let batches = 0;
+  let files = 0;
+  let done = 0;
+  let superseded = 0;
   try {
-    for (let i = 0; i < documents.length; i += size) {
-      const batch = documents.slice(i, i + size);
+    // Durable "a run is in progress" marker (indexing_status id=1, seeded by createDatabase). Read by
+    // the status/health handlers. A crash or a failed batch leaves is_indexing=1 + error with
+    // completed_at NULL, so a wait=false caller can still see the run did not finish.
+    setIndexingStatus(db, config, true, 0, total);
+    let planned = takeFileAlignedBatch(queue, cursor, target);
+    while (planned) {
+      const startedAt = performance.now();
       // Each batch is its own storeDocuments transaction: a failure rolls back only this batch,
       // earlier batches stay committed, and the upserts make a rerun idempotent (resumable). Its
       // bulk pointer flush scans the tenant table once, so scans stay O(batches), not O(docs).
-      await storeDocuments(sqlite, db, null, project, batch, { createdBy: 'retro_indexer', tenantId });
-      for (const doc of chunkDocumentsForIndexing(batch)) chunked.push(doc);
+      await storeDocuments(sqlite, db, null, project, planned.docs, { createdBy: 'retro_indexer', tenantId });
+      // Upserting new deterministic ids leaves legacy active rows for the same source files behind,
+      // which duplicates search results. Supersede them NOW, for this batch's files only (never
+      // hard-delete): the batch is file-aligned, so every chunk of each file is already stored, and
+      // search never sees a file with legacy AND new generations active past this point.
+      const chunked = chunkDocumentsForIndexing(planned.docs);
+      superseded += supersedeReplacedSourceDocs(db, chunked, tenantId);
+      for (const doc of chunked) ids.push(doc.id);
       batches += 1;
+      files += planned.files;
+      done += planned.docs.length;
+      setIndexingStatus(db, config, true, done, total);
+      const wallMs = performance.now() - startedAt;
+      if (fixedSize === undefined) target = nextBatchTarget(target, planned.docs.length, wallMs, sizing);
+      opts.onBatch?.({
+        batch: batches, files: planned.files, sourceFiles: planned.sourceFiles, docs: planned.docs.length, chunks: chunked.length,
+        superseded, wallMs, done, total, nextTarget: target,
+      });
+      planned = takeFileAlignedBatch(queue, cursor, target);
       // Yield the event loop between batches. bun:sqlite is synchronous and never yields on its own,
       // so without this the loop is blocked for the whole run and every HTTP/MCP handler wedges.
-      if (i + size < documents.length) await new Promise<void>((resolve) => setImmediate(resolve));
+      // A short idle gap, not setImmediate/setTimeout(0): the canary showed an immediate lets I/O
+      // run but starves due timers across consecutive batches, and a 0 ms timer can fire before a
+      // pending HTTP request is polled, so one probe waited two batches. 10 ms × batches is noise.
+      if (planned) await new Promise<void>((resolve) => setTimeout(resolve, BATCH_YIELD_MS));
     }
-    // Upserting new deterministic ids leaves legacy active rows for the same source files behind,
-    // which duplicates search results. Supersede them through the owning replaced-source mechanism
-    // (never hard-delete). One pass at the end keeps file-level grouping intact.
-    supersedeReplacedSourceDocs(db, chunked, tenantId);
+    setIndexingStatus(db, config, false, done, total);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    try { setIndexingStatus(db, config, true, done, total, message); } catch { /* keep the original error */ }
+    throw err;
   } finally {
     sqlite.close();
   }
 
-  return { ok: true as const, repoRoot: resolvedRoot, documents: documents.length, ids: chunked.map((doc) => doc.id), batches };
+  return { ok: true as const, repoRoot: resolvedRoot, documents: total, files, ids, batches, superseded };
 }
 
 export async function indexRetroFile(repoRoot: string, filePath: string, dbPath: string = process.env.ORACLE_DB_PATH || DB_PATH) {
