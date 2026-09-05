@@ -130,3 +130,16 @@ function isHttpUrl(value: string): boolean {
 
 export const VECTOR_URL = resolveVectorUrl();
 export const VECTOR_FALLBACK = envText('VECTOR_FALLBACK') || 'fts5';
+
+/**
+ * HTTP bind address for the owner-core server. Default loopback: until this
+ * existed `Bun.serve` used `0.0.0.0`, so the API was reachable from the LAN and
+ * the tailnet while web auth's "local network" check could not see the real
+ * client address (`requestIP` is null outside `app.listen`) and treated every
+ * request as local (audit 2026-09-05). Every known consumer (MCP seats, Studio,
+ * hooks) runs on this host. Set `ORACLE_HOST` explicitly to serve wider.
+ */
+export const DEFAULT_BIND_HOST = '127.0.0.1';
+export function resolveBindHost(env: Record<string, string | undefined> = process.env): string {
+  return env.ORACLE_HOST?.trim() || DEFAULT_BIND_HOST;
+}
