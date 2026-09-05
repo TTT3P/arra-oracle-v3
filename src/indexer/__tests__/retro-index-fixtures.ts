@@ -118,22 +118,22 @@ export const countRows = (dbPath: string, sql: string): number => {
 };
 
 export interface TxnCounts { begin: number; commit: number; rollback: number }
-/** `outer`: raw BEGIN/COMMIT/ROLLBACK statements issued through `Database.run` (the per-batch
- * publish transaction); `nested`: `Database.transaction` callbacks (drizzle `db.transaction`, which
- * bun:sqlite runs as SAVEPOINTs while an outer transaction is open) — begin = entered,
- * commit = returned, rollback = threw. */
-export interface TxnTrace { outer: TxnCounts; nested: TxnCounts }
+/** `native`: `Database.transaction` callbacks (drizzle `db.transaction` → bun:sqlite BEGIN/COMMIT,
+ * or SAVEPOINTs while a raw transaction is open) — begin = entered, commit = returned, rollback =
+ * threw. `raw`: BEGIN/COMMIT/ROLLBACK statements issued through `Database.run` — a manual
+ * transaction, which the indexer must never hold across an `await` (round-3 P1). */
+export interface TxnTrace { native: TxnCounts; raw: TxnCounts }
 
 /** Count transaction boundaries on the connection itself, not a counter the code under test owns. */
 export async function withTxnCounter<T>(run: () => Promise<T>): Promise<{ result: T; txn: TxnTrace }> {
-  const txn: TxnTrace = { outer: { begin: 0, commit: 0, rollback: 0 }, nested: { begin: 0, commit: 0, rollback: 0 } };
+  const txn: TxnTrace = { native: { begin: 0, commit: 0, rollback: 0 }, raw: { begin: 0, commit: 0, rollback: 0 } };
   type Fn = (...args: unknown[]) => unknown;
   const proto = Database.prototype as unknown as { transaction: Fn; run: Fn };
   const originalTx = proto.transaction;
   const originalRun = proto.run;
   const instrument = (f: Fn): Fn => function (this: unknown, ...args: unknown[]) {
-    txn.nested.begin++;
-    try { const r = f.apply(this, args); txn.nested.commit++; return r; } catch (err) { txn.nested.rollback++; throw err; }
+    txn.native.begin++;
+    try { const r = f.apply(this, args); txn.native.commit++; return r; } catch (err) { txn.native.rollback++; throw err; }
   };
   proto.transaction = function (this: unknown, ...args: unknown[]) {
     const native = originalTx.apply(this, args) as Fn & Record<string, Fn>;
@@ -143,9 +143,9 @@ export async function withTxnCounter<T>(run: () => Promise<T>): Promise<{ result
   };
   proto.run = function (this: unknown, ...args: unknown[]) {
     const sql = typeof args[0] === 'string' ? args[0] : '';
-    if (/^\s*begin\b/i.test(sql)) txn.outer.begin++;
-    else if (/^\s*commit\b/i.test(sql)) txn.outer.commit++;
-    else if (/^\s*rollback\b/i.test(sql)) txn.outer.rollback++;
+    if (/^\s*begin\b/i.test(sql)) txn.raw.begin++;
+    else if (/^\s*commit\b/i.test(sql)) txn.raw.commit++;
+    else if (/^\s*rollback\b/i.test(sql)) txn.raw.rollback++;
     return originalRun.apply(this, args);
   };
   try { return { result: await run(), txn }; } finally { proto.transaction = originalTx; proto.run = originalRun; }

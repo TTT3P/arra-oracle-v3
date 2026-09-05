@@ -13,9 +13,10 @@
  * `Database.transaction`) and off a SECOND connection that must see each batch land before the
  * next one starts.
  * Riddler round-2 P1 (test h): a DB error in the supersede step after the store used to leave one
- * file with BOTH generations current through the real `handleSearch`. Fix: one outer transaction
- * per batch publishes store + supersede atomically. Negative control: remove the outer BEGIN/COMMIT
- * → h fails (mixed current results), b2 fails (outer counts).
+ * file with BOTH generations current through the real `handleSearch`. Fix: the supersede runs
+ * inside storeDocuments' own transaction (synchronous `afterStore` hook). Negative controls: run
+ * the supersede after the store outside the transaction → h fails; a raw outer BEGIN/COMMIT held
+ * across `await` (round 3) → b2 fails and the concurrent-writer test i fails.
  */
 import { afterEach, expect, test } from 'bun:test';
 import path from 'node:path';
@@ -116,11 +117,13 @@ test('b2. one native transaction per batch, each visible to a second connection 
   }));
   reader.close();
   expect(result.batches).toBe(5);
-  // One raw outer BEGIN/COMMIT per batch (the atomic publish), storeDocuments' own transaction
-  // nested inside it as a savepoint — never a commit of its own.
-  expect(txn.outer).toEqual({ begin: 5, commit: 5, rollback: 0 });
-  expect(txn.nested.begin - base.nested.begin).toBe(5);
-  expect(txn.nested.rollback).toBe(0);
+  // One native transaction per batch (storeDocuments' own, with the supersede inside it via the
+  // afterStore hook) and NO raw BEGIN/COMMIT — a manual transaction held across `await` starved
+  // other same-process writers (round-3 P1).
+  expect(txn.native.begin - base.native.begin).toBe(5);
+  expect(txn.native.commit - base.native.commit).toBe(5);
+  expect(txn.native.rollback).toBe(0);
+  expect(txn.raw).toEqual({ begin: 0, commit: 0, rollback: 0 });
   expect(seen).toEqual([6, 12, 18, 24, 27]); // every batch durable before the loop moved on
 
   const single = retroEnv(9, 3);
@@ -131,7 +134,8 @@ test('b2. one native transaction per batch, each visible to a second connection 
     batchSize: 100000, onBatch: () => seen2.push((reader2.prepare('SELECT COUNT(*) AS n FROM oracle_documents').get() as { n: number }).n),
   }));
   reader2.close();
-  expect(one.outer).toEqual({ begin: 1, commit: 1, rollback: 0 }); // the old single-transaction shape
+  expect(one.native.begin - base.native.begin).toBe(1); // the old single-transaction shape
+  expect(one.raw.begin).toBe(0);
   expect(seen2).toEqual([27]);
 
   const poisoned = retroEnv(9, 3);
@@ -139,8 +143,9 @@ test('b2. one native transaction per batch, each visible to a second connection 
   poisonAfterInserts(poisoned.dbPath, 12);
   const { txn: failed } = await withTxnCounter(() =>
     indexRetrospectives(poisoned.repoRoot, poisoned.dbPath, { batchSize: 4 }).catch((err: Error) => err));
-  expect(failed.outer).toEqual({ begin: 3, commit: 2, rollback: 1 }); // the failing batch rolled back, nothing else did
-  expect(failed.nested.rollback).toBe(1);
+  expect(failed.native.commit - base.native.commit).toBe(2);
+  expect(failed.native.rollback).toBe(1); // the failing batch rolled back, nothing else did
+  expect(failed.raw.begin).toBe(0);
 });
 
 test('h. a DB failure in the supersede step AFTER the store rolls the whole batch back — the real search handler never sees two current generations', async () => {

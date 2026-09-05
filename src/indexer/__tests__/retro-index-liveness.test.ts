@@ -10,7 +10,10 @@
  * files, so heap after the last batch is not the heap after the first plus the whole corpus.
  */
 import { afterEach, expect, test } from 'bun:test';
+import { createDatabase } from '../../db/index.ts';
 import { indexRetrospectives, type RetrosBatchInfo } from '../retro-index.ts';
+import { storeDocuments } from '../storage.ts';
+import type { OracleDocument } from '../../types.ts';
 import { lagSampler, livenessProbe, percentile, retroEnv, runCleanups } from './retro-index-fixtures.ts';
 
 afterEach(runCleanups);
@@ -71,3 +74,27 @@ test('g. the JS live set plateaus: ids only, processed files released', async ()
   // groups (v1 shape, the negative control) → +4.5 MB and still climbing.
   expect(growth).toBeLessThan(2);
 });
+
+test('i. a second same-process writer (Huginn-style createDatabase + storeDocuments) completes and persists while the reindex runs', async () => {
+  // Riddler round-3 reproduction: two real connections from the production factory on one event
+  // loop, no mocked storage, no changed busy_timeout. Round 3's outer BEGIN IMMEDIATE around
+  // `await storeDocuments` left the write lock held while the loop ran the writer → SQLITE_BUSY.
+  const { dbPath, repoRoot } = retroEnv(3, 3, 900);
+  const writer = createDatabase(dbPath);
+  const doc: OracleDocument = {
+    id: 'concurrent_learning', type: 'learning', source_file: 'concurrent-learning.md',
+    content: 'Concurrent Huginn-style storage while retrospective indexing runs.', concepts: ['review'],
+    created_at: Date.now(), updated_at: Date.now(),
+  };
+  const indexing = indexRetrospectives(repoRoot, dbPath, { batchSize: 1 });
+  let failure: unknown = null;
+  try { await storeDocuments(writer.sqlite, writer.db, null, null, [doc]); } catch (err) { failure = err; }
+  const result = await indexing;
+  const persisted = writer.sqlite.query('SELECT id FROM oracle_documents WHERE id = ?').get(doc.id);
+  expect(writer.sqlite.inTransaction).toBe(false);
+  writer.sqlite.close();
+  expect(failure).toBeNull();
+  expect(persisted).not.toBeNull();
+  expect(result.batches).toBe(3); // the reindex finished too
+  expect(result.ids.length).toBe(18);
+}, 15000);
