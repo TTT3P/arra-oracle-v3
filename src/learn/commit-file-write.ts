@@ -29,6 +29,11 @@ function deepestExisting(dir: string): string {
  * Returns the real path of the created file.
  */
 export function createContainedFile(root: string, filePath: string, content: string): string {
+  // A root that does not exist yet cannot be a symlink escape; the pre-containment code created the
+  // whole tree with mkdir -p (fresh data dir, ORACLE_REPO_ROOT pointing at a new directory), and
+  // callers still rely on that — realpath on a missing root threw ENOENT (regression found by
+  // search-no-avx-fallback.test.ts on 2026-09-05).
+  fs.mkdirSync(path.resolve(root), { recursive: true });
   const realRoot = fs.realpathSync(path.resolve(root));
   const target = path.resolve(filePath);
   const dir = path.dirname(target);

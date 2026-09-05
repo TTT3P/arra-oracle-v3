@@ -27,6 +27,14 @@ describe('createContainedFile', () => {
     expect(real.startsWith(fs.realpathSync(root) + path.sep)).toBe(true);
   });
 
+  test('creates a root that does not exist yet (legacy mkdir -p behaviour; not a containment risk)', () => {
+    const parent = tmp('arra-contained-parent-');
+    const root = path.join(parent, 'new-repo');
+    const real = createContainedFile(root, path.join(root, 'ψ', 'memory', 'learnings', 'first.md'), 'first');
+    expect(fs.readFileSync(real, 'utf8')).toBe('first');
+    expect(real.startsWith(fs.realpathSync(root) + path.sep)).toBe(true);
+  });
+
   test('refuses when ψ is a symlink out of the root, before creating anything outside', () => {
     const root = tmp('arra-contained-root-');
     const outside = tmp('arra-contained-outside-');

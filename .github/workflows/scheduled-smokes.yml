@@ -1,8 +1,8 @@
-name: Docker hero smoke
+name: Scheduled smokes
 
-# Docker-backed smokes that must NOT sit in the PR gate (audit 2026-09-05 P1-1): the README
-# "Docker-first hero path" builds the http-server image and runs the advertised container.
-# Scheduled daily plus on demand; never a required branch-protection check.
+# Smokes that must NOT sit in the PR gate (audit 2026-09-05 P1-1 and the timing class): the README
+# "Docker-first hero path" (builds the http-server image, runs the container) and the retro-index
+# liveness/heap timing cases. Scheduled daily plus on demand; never a required branch-protection check.
 on:
   schedule:
     - cron: '17 20 * * *'   # 03:17 ICT daily
@@ -10,7 +10,7 @@ on:
 
 jobs:
   docker-hero:
-    name: README Docker hero path (scheduled)
+    name: Docker hero path + timing smokes (scheduled)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -34,3 +34,6 @@ jobs:
 
       - name: README Docker hero path smoke
         run: bun test --isolate tests/integration/readme-docker-hero.test.ts
+
+      - name: Retro-index liveness and heap timing
+        run: bun test --isolate tests/integration/retro-index-liveness-timing.test.ts

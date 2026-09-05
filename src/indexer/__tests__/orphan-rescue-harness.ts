@@ -14,11 +14,18 @@ export const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'arra-rescue-apply-
 process.on('exit', () => { try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* best effort */ } });
 process.env.ORACLE_DATA_DIR = path.join(tmpRoot, 'data');
 
-const { createDatabase } = await import('../../db/index.ts');
-const { buildOrphanRescuePlan } = await import('../orphan-rescue-plan.ts');
-const { CANONICAL_SOURCE_ROOT_KEY } = await import('../prune-authority.ts');
-const { applyOrphanRescue } = await import('../orphan-rescue-apply.ts');
-const { exportOracleData } = await import('../../../tools/export-app/exporter.ts');
+let envCounter = 0;
+
+// Synchronous loads (not top-level `await import`): these modules freeze ORACLE_DATA_DIR at import
+// time, so they must load after the env line above — but a top-level await lets an importing test
+// file run before this module finishes on bun 1.3.14 (the gate's pinned runtime), which surfaced as
+// "Cannot access 'envCounter' / 'createDatabase' before initialization" in every Gate C suite.
+// `require` keeps the ordering guarantee without suspending the module graph.
+const { createDatabase } = require('../../db/index.ts') as typeof import('../../db/index.ts');
+const { buildOrphanRescuePlan } = require('../orphan-rescue-plan.ts') as typeof import('../orphan-rescue-plan.ts');
+const { CANONICAL_SOURCE_ROOT_KEY } = require('../prune-authority.ts') as typeof import('../prune-authority.ts');
+const { applyOrphanRescue } = require('../orphan-rescue-apply.ts') as typeof import('../orphan-rescue-apply.ts');
+const { exportOracleData } = require('../../../tools/export-app/exporter.ts') as typeof import('../../../tools/export-app/exporter.ts');
 
 export const sha256 = (t: string) => crypto.createHash('sha256').update(t, 'utf8').digest('hex');
 
@@ -35,8 +42,6 @@ export interface RescueEnv {
   bundle: string;
   journalPath: string;
 }
-
-let envCounter = 0;
 
 export function makeEnv(docs: EnvDoc[]): RescueEnv {
   const dir = fs.mkdtempSync(path.join(tmpRoot, `env-${envCounter++}-`));
