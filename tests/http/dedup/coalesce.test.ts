@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { Elysia } from 'elysia';
+import { runWithRemoteAddress } from '../../../src/middleware/remote-address.ts';
+
+// Coalescing is bound to the trusted client address (PR#22); these cases model one loopback caller.
+const served = <T,>(fn: () => T): T => runWithRemoteAddress('127.0.0.1', fn);
 import {
   createRequestDedupFetch,
   handleRequestDedup,
@@ -57,9 +61,9 @@ describe('request deduplication middleware', () => {
     const app = slowApp(block, hits);
     const fetchDedup = createRequestDedupFetch((req) => app.handle(req));
 
-    const first = fetchDedup(request('/slow?item=1'));
+    const first = served(() => fetchDedup(request('/slow?item=1')));
     await waitFor(() => hits.count === 1);
-    const second = fetchDedup(request('/slow?item=1'));
+    const second = served(() => fetchDedup(request('/slow?item=1')));
     await Bun.sleep(1);
 
     expect(hits.count).toBe(1);
@@ -77,8 +81,8 @@ describe('request deduplication middleware', () => {
     const app = new Elysia().get('/fast', () => Response.json({ hit: ++hits }));
     const fetchDedup = createRequestDedupFetch((req) => app.handle(req));
 
-    const first = await fetchDedup(request('/fast'));
-    const second = await fetchDedup(request('/fast'));
+    const first = await served(() => fetchDedup(request('/fast')));
+    const second = await served(() => fetchDedup(request('/fast')));
 
     expect(await json(first)).toEqual({ hit: 1 });
     expect(await json(second)).toEqual({ hit: 2 });
@@ -91,18 +95,20 @@ describe('request deduplication middleware', () => {
     const app = slowApp(block, hits);
     const fetchDedup = createRequestDedupFetch((req) => app.handle(req));
 
-    const first = fetchDedup(request('/slow?item=1'));
-    const second = fetchDedup(request('/slow?item=2'));
-    const postA = fetchDedup(request('/slow?item=1', { method: 'POST' }));
-    const postB = fetchDedup(request('/slow?item=1', { method: 'POST' }));
+    const first = served(() => fetchDedup(request('/slow?item=1')));
+    const second = served(() => fetchDedup(request('/slow?item=2')));
+    const postA = served(() => fetchDedup(request('/slow?item=1', { method: 'POST' })));
+    const postB = served(() => fetchDedup(request('/slow?item=1', { method: 'POST' })));
     await waitFor(() => hits.count === 4);
 
     block.release();
     await Promise.all([first, second, postA, postB]);
 
     expect(hits.count).toBe(4);
-    expect(requestDedupKey(request('/slow'))).toContain('GET http://local/slow');
-    expect(requestDedupKey(request('/slow', { method: 'POST' }))).toBeNull();
+    expect(served(() => requestDedupKey(request('/slow')))).toContain('GET http://local/slow');
+    expect(served(() => requestDedupKey(request('/slow')))).toContain('addr:127.0.0.1');
+    expect(requestDedupKey(request('/slow'))).toBeNull(); // no captured address → never coalesced
+    expect(served(() => requestDedupKey(request('/slow', { method: 'POST' })))).toBeNull();
   });
 
   test('keeps response variants isolated by key headers', async () => {
@@ -111,9 +117,9 @@ describe('request deduplication middleware', () => {
     const app = slowApp(block, hits);
     const fetchDedup = createRequestDedupFetch((req) => app.handle(req));
 
-    const plain = fetchDedup(request('/slow?item=1'));
-    const gzip = fetchDedup(request('/slow?item=1', { headers: { 'Accept-Encoding': 'gzip' } }));
-    const authorized = fetchDedup(request('/slow?item=1', { headers: { Authorization: 'Bearer one' } }));
+    const plain = served(() => fetchDedup(request('/slow?item=1')));
+    const gzip = served(() => fetchDedup(request('/slow?item=1', { headers: { 'Accept-Encoding': 'gzip' } })));
+    const authorized = served(() => fetchDedup(request('/slow?item=1', { headers: { Authorization: 'Bearer one' } })));
     await waitFor(() => hits.count === 3);
 
     block.release();
@@ -131,8 +137,8 @@ describe('request deduplication middleware', () => {
       return new Response(req.method, { headers: { 'x-method': req.method } });
     });
 
-    const get = fetchDedup(request('/same'));
-    const head = fetchDedup(request('/same', { method: 'HEAD' }));
+    const get = served(() => fetchDedup(request('/same')));
+    const head = served(() => fetchDedup(request('/same', { method: 'HEAD' })));
     await waitFor(() => hits === 2);
     block.release();
     const [getRes, headRes] = await Promise.all([get, head]);
@@ -144,11 +150,11 @@ describe('request deduplication middleware', () => {
 
   test('allows a custom key function to opt out of coalescing', async () => {
     let hits = 0;
-    const res = await handleRequestDedup(
+    const res = await served(() => handleRequestDedup(
       request('/custom'),
       () => Response.json({ hit: ++hits }),
       { key: () => null, store: new Map() },
-    );
+    ));
 
     expect(await json(res)).toEqual({ hit: 1 });
     expect(hits).toBe(1);
@@ -160,11 +166,11 @@ describe('request deduplication middleware', () => {
     const app = slowApp(block, hits);
     const fetchDedup = createRequestDedupFetch((req) => app.handle(req));
 
-    const tenantA = fetchDedup(request('/slow?item=tenant', { headers: { [TENANT_HEADER]: 'tenant-a' } }));
-    const tenantB = fetchDedup(request('/slow?item=tenant', { headers: { [TENANT_HEADER]: 'tenant-b' } }));
-    const legacyTenant = fetchDedup(request('/slow?item=tenant', { headers: { [LEGACY_TENANT_HEADER]: 'tenant-a' } }));
-    const orgTenant = fetchDedup(request('/slow?item=tenant', { headers: { [ORG_HEADER]: 'tenant-a' } }));
-    const apiKeyTenant = fetchDedup(request('/slow?item=tenant', { headers: { [TENANT_API_KEY_HEADER]: 'tenant-key' } }));
+    const tenantA = served(() => fetchDedup(request('/slow?item=tenant', { headers: { [TENANT_HEADER]: 'tenant-a' } })));
+    const tenantB = served(() => fetchDedup(request('/slow?item=tenant', { headers: { [TENANT_HEADER]: 'tenant-b' } })));
+    const legacyTenant = served(() => fetchDedup(request('/slow?item=tenant', { headers: { [LEGACY_TENANT_HEADER]: 'tenant-a' } })));
+    const orgTenant = served(() => fetchDedup(request('/slow?item=tenant', { headers: { [ORG_HEADER]: 'tenant-a' } })));
+    const apiKeyTenant = served(() => fetchDedup(request('/slow?item=tenant', { headers: { [TENANT_API_KEY_HEADER]: 'tenant-key' } })));
     await waitFor(() => hits.count === 5);
 
     block.release();
@@ -182,9 +188,9 @@ describe('request deduplication middleware', () => {
       return new Response(null, { status: 204, statusText: 'No Content', headers: { 'x-hit': String(hits) } });
     });
 
-    const first = fetchDedup(request('/empty', { method: 'HEAD' }));
+    const first = served(() => fetchDedup(request('/empty', { method: 'HEAD' })));
     await waitFor(() => hits === 1);
-    const second = fetchDedup(request('/empty', { method: 'HEAD' }));
+    const second = served(() => fetchDedup(request('/empty', { method: 'HEAD' })));
     block.release();
     const [a, b] = await Promise.all([first, second]);
 
@@ -204,15 +210,15 @@ describe('request deduplication middleware', () => {
       throw new Error('boom');
     };
 
-    const first = handleRequestDedup(request('/fail'), fail, { store });
-    const second = handleRequestDedup(request('/fail'), fail, { store });
+    const first = served(() => handleRequestDedup(request('/fail'), fail, { store }));
+    const second = served(() => handleRequestDedup(request('/fail'), fail, { store }));
     const results = await Promise.allSettled([first, second]);
 
     expect(results.every((result) => result.status === 'rejected')).toBe(true);
     expect(hits).toBe(1);
     expect(store.size).toBe(0);
 
-    await expect(handleRequestDedup(request('/open', { method: 'POST' }), fail, { store })).rejects.toThrow('boom');
+    await expect(served(() => handleRequestDedup(request('/open', { method: 'POST' }), fail, { store }))).rejects.toThrow('boom');
     expect(hits).toBe(2);
   });
 });

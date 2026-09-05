@@ -1,3 +1,4 @@
+import { currentRemoteAddress } from './remote-address.ts';
 import {
   LEGACY_TENANT_HEADER,
   ORG_HEADER,
@@ -42,9 +43,19 @@ function variantScope(request: Request): string {
   return VARIANT_HEADERS.map((name) => `${name.toLowerCase()}:${request.headers.get(name) ?? ''}`).join('\n');
 }
 
+/**
+ * Coalescing key. Bound to the trusted captured client address (Riddler PR#22):
+ * a replayed response carries the first caller's authorization, so two callers
+ * may share one only when they are the same socket address. A request whose
+ * address is unknown (null) or that is not being served through the outer fetch
+ * (undefined) is never coalesced — it runs its own route and auth guard.
+ */
 export function requestDedupKey(request: Request): DedupKey {
   const method = request.method.toUpperCase();
-  return COALESCED_METHODS.has(method) ? `${method} ${request.url}\n${variantScope(request)}` : null;
+  if (!COALESCED_METHODS.has(method)) return null;
+  const address = currentRemoteAddress();
+  if (!address) return null;
+  return `${method} ${request.url}\naddr:${address}\n${variantScope(request)}`;
 }
 
 async function responseSnapshot(response: Response): Promise<ResponseSnapshot> {
