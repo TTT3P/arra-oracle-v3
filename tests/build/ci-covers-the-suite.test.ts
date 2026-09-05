@@ -25,15 +25,20 @@ const ROOT = join(import.meta.dir, '..', '..');
 const WORKFLOW = readFileSync(join(ROOT, '.github/workflows/test.yml'), 'utf-8');
 const CLAUDE_MD = readFileSync(join(ROOT, 'CLAUDE.md'), 'utf-8');
 
-/** Directories the CI workflow passes to `bun test`. */
+/**
+ * Directories the CI workflow passes to `bun test` — read from the one heredoc list
+ * (`<<'GROUPS'` … `GROUPS`) in the "Run unit tests" step. The loop iterates that same file,
+ * and the "Gate verdict" step requires a recorded result for every entry in it, so this is
+ * the single source of truth for what the gate runs.
+ *
+ * (An earlier version parsed a `for group in … do` list and had to split on the shell keyword
+ * `do` at the start of its own line — a bare `.split('do')` truncated the list at `tests/docs`
+ * and reported 20 phantom uncovered groups on the first run of this very test.)
+ */
 function ciGroups(): string[] {
-  // Split on the shell keyword `do` at the start of its own line — a bare `.split('do')`
-  // truncates the list at `tests/docs`, which contains the substring. That mistake reported
-  // 20 phantom uncovered groups on the first run of this very test.
-  const after = WORKFLOW.split('for group in')[1] ?? '';
-  const block = after.split(/\n\s*do\b/)[0] ?? '';
+  const after = WORKFLOW.split("<<'GROUPS'")[1] ?? '';
+  const block = after.split(/\n\s*GROUPS\b/)[0] ?? '';
   return block
-    .replace(/\\\s*\n/g, ' ')
     .split(/\s+/)
     .map((entry) => entry.trim().replace(/\/$/, ''))
     .filter((entry) => entry.startsWith('src') || entry.startsWith('tests'));
@@ -93,6 +98,36 @@ describe('CI runs the whole test suite', () => {
     const covered = new Set(ciGroups());
     expect(covered.has('tests/frontend')).toBe(true); // #2848's four red tests lived here
     expect(covered.has('tests/build')).toBe(true); // the 250-line ratchet lives here
+  });
+
+  test('the list is read from the heredoc the loop actually iterates, and is not empty', () => {
+    // The loop reads $GATE_EXPECTED, written from the heredoc; the verdict step walks the
+    // same file. If either side stops using it, this parser is reading dead text.
+    expect(WORKFLOW).toContain('cat > "$GATE_EXPECTED" <<\'GROUPS\'');
+    expect(WORKFLOW).toContain('for group in $(cat "$GATE_EXPECTED")');
+    expect(ciGroups().length).toBeGreaterThanOrEqual(35);
+  });
+});
+
+describe('the gate cannot pass by omission', () => {
+  // Riddler R-B (2026-09-06): the loop used to exit on the first red group, so 34 groups had
+  // never run on CI; and GitHub counts a skipped required check as passing. The verdict step
+  // must run unconditionally and reject anything but a recorded pass for every group.
+  const verdict = WORKFLOW.split('- name: Gate verdict')[1] ?? '';
+
+  test('a verdict step exists, runs with always(), and is the only step that exits on results', () => {
+    expect(verdict).toContain('if: always()');
+    expect(verdict).toContain('steps.groups.outcome');
+    // The loop itself must not abort on a failing group — that is what hid the other groups.
+    const loop = WORKFLOW.split('- name: Run unit tests')[1]?.split('- name: Gate verdict')[0] ?? '';
+    expect(loop).not.toMatch(/\n\s*exit "\$status"/);
+    expect(loop).toContain('>> "$GATE_RESULTS"');
+  });
+
+  test('the verdict rejects a skipped/cancelled test step and a missing group row', () => {
+    expect(verdict).toContain('!= "success"');
+    expect(verdict).toContain('no result recorded');
+    expect(verdict).toContain('!= "pass"');
   });
 });
 

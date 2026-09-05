@@ -83,20 +83,35 @@ jobs:
       # Trailing slashes are load-bearing. `bun test <path>` is a SUBSTRING FILTER: bare
       # `tests/server` matched `integration-tests/serverless.test.mjs` in a *different
       # repository* two levels up the ghq tree and tried to run it. `tests/server/` does not.
+      # Every group runs, every time. The first version of this loop exited on the first red
+      # group, so a red tests/build/ hid whatever came after it (the 34 later groups had never
+      # run on CI until #24's follow-up; Riddler R-B, 2026-09-06). Now each group records
+      # pass/fail into $GATE_RESULTS and the loop carries on; the "Gate verdict" step below is
+      # the single place that fails the job, after it has seen every result.
       - name: Run unit tests
+        id: groups
         shell: bash
+        env:
+          GATE_RESULTS: ${{ runner.temp }}/gate-groups.tsv
+          GATE_EXPECTED: ${{ runner.temp }}/gate-expected.txt
         run: |
-          set -euo pipefail
-          for group in \
-            src/ \
-            tests/build/ tests/frontend/ tests/http/ tests/mcp/ tests/vector/ \
-            tests/cli/ tests/plugins/ tests/storage/ tests/workers/ tests/tools/ \
-            tests/docs/ tests/config/ tests/process-manager/ tests/lifecycle/ \
-            tests/smoke/ tests/export/ tests/services/ tests/knowledge/ tests/forum/ tests/eval/ \
-            tests/bin/ tests/canvas/ tests/db/ tests/indexer/ tests/lib/ tests/oracles/ \
-            tests/runtime/ tests/search/ tests/server/ tests/util/ tests/vault/ \
-            tests/learn/ tests/maintenance/ tests/mechanics/ tests/ops/
-          do
+          set -uo pipefail
+          # The one list of PR-gate groups. tests/build/ci-covers-the-suite.test.ts reads it
+          # from this heredoc and fails when a tracked test directory is missing from it.
+          # src/integration/ is listed on its own so its result is a visible row in the verdict.
+          cat > "$GATE_EXPECTED" <<'GROUPS'
+          src/
+          tests/build/ tests/frontend/ tests/http/ tests/mcp/ tests/vector/
+          tests/cli/ tests/plugins/ tests/storage/ tests/workers/ tests/tools/
+          tests/docs/ tests/config/ tests/process-manager/ tests/lifecycle/
+          tests/smoke/ tests/export/ tests/services/ tests/knowledge/ tests/forum/ tests/eval/
+          tests/bin/ tests/canvas/ tests/db/ tests/indexer/ tests/lib/ tests/oracles/
+          tests/runtime/ tests/search/ tests/server/ tests/util/ tests/vault/
+          tests/learn/ tests/maintenance/ tests/mechanics/ tests/ops/
+          src/integration/
+          GROUPS
+          : > "$GATE_RESULTS"
+          for group in $(cat "$GATE_EXPECTED"); do
             echo "::group::${group}"
             # Exit 133 is bun CRASHING (SIGTRAP), not a test failing — the two are
             # indistinguishable by exit status alone, and conflating them is how a sweep ends
@@ -106,10 +121,9 @@ jobs:
             # pass together, all 8 loose files pass together, and it still happens with the
             # server-spawning suites removed. It is the size of one invocation. See #2867.
             #
-            # So: retry ONCE on 133 only. A real test failure (any other non-zero) fails
-            # immediately and is never retried — retrying those would hide flaky tests, which
-            # is the opposite of what this gate is for.
-            set +e
+            # So: retry ONCE on 133 only. A real test failure (any other non-zero) is recorded
+            # as-is and never retried — retrying those would hide flaky tests, which is the
+            # opposite of what this gate is for.
             bun test --isolate "${group}"
             status=$?
             if [ "$status" -eq 133 ]; then
@@ -117,17 +131,60 @@ jobs:
               bun test --isolate "${group}"
               status=$?
             fi
-            set -e
-            if [ "$status" -ne 0 ]; then
-              echo "::error::${group} failed with exit ${status}"
-              exit "$status"
-            fi
             echo "::endgroup::"
+            if [ "$status" -eq 0 ]; then
+              printf '%s\tpass\n' "${group}" >> "$GATE_RESULTS"
+            else
+              echo "::error::${group} failed with exit ${status}"
+              printf '%s\tfail (exit %s)\n' "${group}" "${status}" >> "$GATE_RESULTS"
+            fi
           done
+          echo "--- recorded results ---"
+          cat "$GATE_RESULTS"
 
-      # Deliberately NOT in the loop above:
+      # Deliberately NOT in the list above:
       #   tests/integration/  — docker-backed smokes (compose stack, README hero path); scheduled scheduled-smokes.yml
       #   tests/benchmarks/   — timing-sensitive, belongs in a scheduled job not a PR gate
       #   tests/e2e/          — *.e2e.ts, needs a browser; not picked up by bun test anyway
-      - name: Run scoped integration tests
-        run: bun test --isolate src/integration/
+
+      # The only step that turns the job red for test results. `if: always()` so it also runs
+      # when the test step was skipped or cancelled — and then it FAILS, because GitHub counts
+      # a skipped required check as passing, and a gate must never pass by omission. Every
+      # listed group needs a recorded `pass`; a missing row, a fail row, or a non-success test
+      # step outcome is red. (The job itself has no path filter, so it always runs on a PR.)
+      - name: Gate verdict (every group ran and passed)
+        if: always()
+        shell: bash
+        env:
+          GATE_RESULTS: ${{ runner.temp }}/gate-groups.tsv
+          GATE_EXPECTED: ${{ runner.temp }}/gate-expected.txt
+          GROUPS_OUTCOME: ${{ steps.groups.outcome }}
+        run: |
+          set -uo pipefail
+          echo "test step outcome: ${GROUPS_OUTCOME}"
+          if [ "${GROUPS_OUTCOME}" != "success" ]; then
+            echo "::error::test step outcome is '${GROUPS_OUTCOME}' (skipped, cancelled or failed) — the gate does not pass by omission"
+            exit 1
+          fi
+          if [ ! -s "${GATE_EXPECTED}" ] || [ ! -f "${GATE_RESULTS}" ]; then
+            echo "::error::no group results were recorded"
+            exit 1
+          fi
+          red=0; missing=0; total=0
+          for group in $(cat "${GATE_EXPECTED}"); do
+            total=$((total + 1))
+            status=$(awk -F'\t' -v g="${group}" '$1 == g { s = $2 } END { print s }' "${GATE_RESULTS}")
+            if [ -z "${status}" ]; then
+              echo "::error::${group}: no result recorded"
+              missing=$((missing + 1))
+            elif [ "${status}" != "pass" ]; then
+              echo "::error::${group}: ${status}"
+              red=$((red + 1))
+            else
+              echo "${group}: pass"
+            fi
+          done
+          echo "groups: ${total} listed, $((total - red - missing)) passed, ${red} failed, ${missing} missing"
+          if [ "${red}" -ne 0 ] || [ "${missing}" -ne 0 ]; then
+            exit 1
+          fi

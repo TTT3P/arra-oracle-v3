@@ -22,8 +22,9 @@ const LIMIT = 250;
 const REPO_ROOT = join(import.meta.dir, '..', '..');
 
 /**
- * Known offenders at alpha 9d4ca2f2 (2026-07-25), with the count at that commit.
- * A file may not exceed its recorded count — shrinking is always allowed.
+ * Known offenders at alpha 9d4ca2f2 (2026-07-25), with the count at that commit, plus the
+ * one-time baseline reset of 2026-09-06 (see the second block). A file may not exceed its
+ * recorded count — shrinking is always allowed.
  */
 const GRANDFATHERED: Record<string, number> = {
   'src/server/handlers.ts': 844,
@@ -42,7 +43,33 @@ const GRANDFATHERED: Record<string, number> = {
   'src/server.ts': 293,
   'cli/src/cli.ts': 286,
   'src/vector/__tests__/benchmark.ts': 278,
+
+  // Baseline reset #2 — alpha e61768a9, 2026-09-06 (CROO decision, Riddler R-B review).
+  // The PR gate had never executed tests/build/ on CI before 2026-09-05 (the loop was
+  // ~15% of the suite, see the header), so these ten files were merged over the limit
+  // while the check stayed green. Once the gate ran for real it went permanently red on
+  // debt that was already on alpha, and every merge needed a branch-protection waiver.
+  // A ratchet that is always red ratchets nothing; merged debt belongs in the baseline.
+  // Splitting them is backlog OM-BL-2026-09-05-01 (oracle-maint-oracle ψ/backlog), P2.
+  // Same rule as above: an entry may only shrink or disappear, never grow.
+  'src/maintenance/oracle101-phase-c-repair.ts': 473,
+  'src/tools/read.ts': 432,
+  'tests/maintenance/oracle101-phase-c-repair.test.ts': 346,
+  'src/mcp/server.ts': 329,
+  'src/tools/__tests__/backend-tools-unit.test.ts': 291,
+  'src/tools/__tests__/learn-enqueue.test.ts': 282,
+  'src/indexer/parser.ts': 263,
+  'src/indexer/__tests__/prune-guard.test.ts': 262,
+  'src/tools/__tests__/read-ghq-origin-mapping-e2e.test.ts': 261,
+  'src/config/validate.ts': 257,
 };
+
+/**
+ * The list only ever shrinks. 13 entries at the first baseline (2026-07-25), 23 after the
+ * one-time reset above; a third reset is a CROO decision with a dated comment, not a quiet
+ * edit of this number.
+ */
+const BASELINE_SIZE = 23;
 
 /**
  * Tracked files PLUS untracked-but-not-ignored ones.
@@ -93,6 +120,10 @@ describe('file size rule', () => {
       .map((entry) => `${entry.file}: ${entry.actual} > ${entry.allowed}`);
 
     expect(grown).toEqual([]);
+  });
+
+  test('the allow-list never grows past its recorded baseline', () => {
+    expect(Object.keys(GRANDFATHERED).length).toBeLessThanOrEqual(BASELINE_SIZE);
   });
 
   test('the allow-list contains no file that is already compliant or gone', () => {
