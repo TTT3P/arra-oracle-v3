@@ -95,7 +95,11 @@ jobs:
           GATE_RESULTS: ${{ runner.temp }}/gate-groups.tsv
           GATE_EXPECTED: ${{ runner.temp }}/gate-expected.txt
         run: |
+          # GitHub runs `shell: bash` steps with `-e` already on. This loop must NOT stop at the
+          # first red group (that is exactly the omission the verdict step exists to catch), so
+          # errexit is switched off here; each group's exit status is recorded instead.
           set -uo pipefail
+          set +e
           # The one list of PR-gate groups. tests/build/ci-covers-the-suite.test.ts reads it
           # from this heredoc and fails when a tracked test directory is missing from it.
           # src/integration/ is listed on its own so its result is a visible row in the verdict.

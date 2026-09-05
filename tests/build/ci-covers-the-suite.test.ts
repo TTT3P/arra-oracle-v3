@@ -121,6 +121,9 @@ describe('the gate cannot pass by omission', () => {
     // The loop itself must not abort on a failing group — that is what hid the other groups.
     const loop = WORKFLOW.split('- name: Run unit tests')[1]?.split('- name: Gate verdict')[0] ?? '';
     expect(loop).not.toMatch(/\n\s*exit "\$status"/);
+    // GitHub's `shell: bash` is `bash -eo pipefail`; without an explicit `set +e` the first
+    // failing `bun test` aborts the loop (PR #25's first run stopped inside tests/http/).
+    expect(loop).toContain('set +e');
     expect(loop).toContain('>> "$GATE_RESULTS"');
   });
 
