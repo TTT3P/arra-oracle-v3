@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { freePort } from './free-port.ts';
 
 const repoRoot = resolve(import.meta.dir, '../../..');
 const tempDirs: string[] = [];
@@ -62,7 +63,7 @@ afterEach(() => {
 });
 
 test('oracle_trace proxies through ORACLE_API without opening the MCP DB', async () => {
-  const port = 48600 + Math.floor(Math.random() * 500);
+  const port = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const serverDataDir = tempDir('arra-trace-proxy-server-');
   const serverRepoRoot = tempDir('arra-trace-proxy-repo-');

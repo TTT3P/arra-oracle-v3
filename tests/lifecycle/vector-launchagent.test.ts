@@ -10,7 +10,11 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe('vector sidecar LaunchAgent installer', () => {
+// macOS only: scripts/install-vector-launchagent.sh renders a launchd plist and self-lints it
+// with `plutil -lint` (line 93), which does not exist on Linux — on the ubuntu PR-gate runner
+// the script exits 127 before writing the plist (ENOENT here; PR #25 run 33981405921, the
+// first CI run to reach tests/lifecycle/). Skipped there, explicitly; still runs on every mac.
+describe.skipIf(process.platform !== 'darwin')('vector sidecar LaunchAgent installer', () => {
   test('renders an idempotent login job without invoking launchctl in install-only mode', () => {
     const root = mkdtempSync(join(tmpdir(), 'arra-vector-launchagent-'));
     roots.push(root);

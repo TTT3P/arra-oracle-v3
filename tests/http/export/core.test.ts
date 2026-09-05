@@ -102,8 +102,13 @@ describe('export core HTTP routes', () => {
     expect(body.documents[0]?.metadata).toMatchObject({ type: 'learning', source_file: 'ψ/export/alpha.md' });
   });
 
-  test('POST /api/export/run executes the standalone export engine', async () => {
-    const res = await request('/api/v1/export/run', {
+  // The engine route is '/export/engine/run' (see the note in src/routes/export/core.ts:
+  // '/export/run' belongs to the export-history job recorder). This test still posted to the
+  // old path, and in this app — core routes only — that path is unregistered, so the response
+  // was a non-JSON 404 and the failure read "Failed to parse JSON". Seen on the first CI run
+  // that ever reached tests/http/ (PR #25, run 33981074230); reproduced on bun 1.3.13/1.3.14.
+  test('POST /api/export/engine/run executes the standalone export engine', async () => {
+    const res = await request('/api/v1/export/engine/run', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({}),

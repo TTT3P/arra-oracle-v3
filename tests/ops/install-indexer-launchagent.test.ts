@@ -35,7 +35,10 @@ function runInstaller(opts: { port?: string } = {}): { code: number; stderr: str
   return { code: proc.exitCode ?? -1, stderr: proc.stderr.toString(), plistExists, plist: plistExists ? fs.readFileSync(plistPath, 'utf8') : '' };
 }
 
-describe('install-indexer-launchagent.sh (Phase-4a fix 3)', () => {
+// macOS only: the installer self-lints with `plutil -lint` (scripts/install-indexer-launchagent.sh
+// line 116); on Linux plutil is absent and the script exits 127 (PR #25 run 33981405921, the
+// first CI run to reach tests/ops/). Skipped there, explicitly; still runs on every mac.
+describe.skipIf(process.platform !== 'darwin')('install-indexer-launchagent.sh (Phase-4a fix 3)', () => {
   const { code, plist } = runInstaller();
 
   test('exits 0 and writes a plist under INSTALL_ONLY', () => {

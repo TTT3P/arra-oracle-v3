@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { freePort } from './free-port.ts';
 
 const repoRoot = resolve(import.meta.dir, '../../..');
 const tempDirs: string[] = [];
@@ -41,7 +42,7 @@ test('oracle_learn proxies through ORACLE_API without opening the MCP DB', async
   // Keep learn on its own port band. This test runs concurrently with the
   // verify proxy test under `bun test --isolate`; sharing the 496xx band made
   // CI occasionally start two HTTP servers on the same port.
-  const port = 50600 + Math.floor(Math.random() * 300);
+  const port = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const serverDataDir = tempDir('arra-learn-proxy-server-');
   const serverRepoRoot = tempDir('arra-learn-proxy-repo-');
