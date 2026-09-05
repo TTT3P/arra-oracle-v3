@@ -8,3 +8,5 @@
  */
 await import('../../server/logging.ts');
 await import('../../vault/handler.ts');
+
+export {};
