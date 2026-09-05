@@ -12,6 +12,7 @@ import { DB_PATH, CHROMADB_DIR } from '../config.ts';
 import { getVaultPsiRoot } from '../vault/handler.ts';
 import type { IndexerConfig } from '../types.ts';
 import { OracleIndexer } from './index.ts';
+import { validateLearningsRoot, type LearningsPassOptions } from './learnings-pass.ts';
 
 const scriptDir = import.meta.dirname || path.dirname(new URL(import.meta.url).pathname);
 const projectRoot = path.resolve(scriptDir, '..', '..');
@@ -58,6 +59,20 @@ export function createIndexerConfig(repoRoot: string): IndexerConfig {
         : undefined,
     },
   };
+}
+
+/**
+ * `scope=learnings`: explicit, validated root; only ψ/memory/learnings is read
+ * and stored; nothing is pruned. Shared by the HTTP route and the CLI.
+ */
+export async function runOracleReindexLearnings(opts: { repoRoot?: string | null } & LearningsPassOptions) {
+  const repoRoot = validateLearningsRoot(opts.repoRoot);
+  const indexer = new OracleIndexer(createIndexerConfig(repoRoot));
+  try {
+    return await indexer.indexLearnings({ dryRun: opts.dryRun });
+  } finally {
+    await indexer.close();
+  }
 }
 
 export async function runOracleReindex(opts: { repoRoot?: string | null; append?: boolean; confirmDelete?: number } = {}) {

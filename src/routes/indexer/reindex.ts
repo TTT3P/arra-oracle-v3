@@ -1,5 +1,5 @@
 import { Elysia, t } from 'elysia';
-import { runOracleReindex, resolveIndexerRepoRoot } from '../../indexer/runner.ts';
+import { runOracleReindex, runOracleReindexLearnings, resolveIndexerRepoRoot } from '../../indexer/runner.ts';
 import { indexRetrospectives, indexRetroFile } from '../../indexer/retro-index.ts';
 import { currentTenantId, runWithTenant } from '../../middleware/tenant.ts';
 import { describeError, describeRepoRoot, reindexLogLine, reindexOrigin } from './reindex-log.ts';
@@ -7,13 +7,16 @@ import { describeError, describeRepoRoot, reindexLogLine, reindexOrigin } from '
 type ReindexResult =
   | Awaited<ReturnType<typeof runOracleReindex>>
   | Awaited<ReturnType<typeof indexRetrospectives>>
-  | Awaited<ReturnType<typeof indexRetroFile>>;
+  | Awaited<ReturnType<typeof indexRetroFile>>
+  | Awaited<ReturnType<typeof runOracleReindexLearnings>>;
 
 export interface ReindexDeps {
   resolveRepoRoot: (repoRoot?: string | null) => string;
   runFull: (opts: { repoRoot?: string | null; append?: boolean }) => Promise<ReindexResult>;
   runRetros: (repoRoot: string) => Promise<ReindexResult>;
   runRetroFile: (repoRoot: string, filePath: string) => Promise<ReindexResult>;
+  /** scope=learnings: explicit root, ψ/memory/learnings only, no prune, retros never read. */
+  runLearnings: (opts: { repoRoot: string; dryRun?: boolean }) => Promise<ReindexResult>;
   /** Origin/lifecycle log sink (default console.log). Injected by tests. */
   log?: (line: string) => void;
 }
@@ -23,6 +26,7 @@ const defaultDeps: ReindexDeps = {
   runFull: runOracleReindex,
   runRetros: indexRetrospectives,
   runRetroFile: indexRetroFile,
+  runLearnings: runOracleReindexLearnings,
 };
 
 export function createReindexRoute(overrides: Partial<ReindexDeps> = {}) {
@@ -36,6 +40,7 @@ export function createReindexRoute(overrides: Partial<ReindexDeps> = {}) {
     const scope = requested.scope ?? 'all';
     const wait = requested.wait !== false;
     const append = requested.append === true;
+    const dryRun = requested.dryRun === true;
     const repoRoot = deps.resolveRepoRoot(requested.repoRoot);
     const jobId = `reindex-${Date.now()}`;
     const tenantId = currentTenantId();
@@ -52,6 +57,11 @@ export function createReindexRoute(overrides: Partial<ReindexDeps> = {}) {
     log(reindexLogLine('start', { jobId, ...origin, repo: describeRepoRoot(repoRoot) }));
 
     const run = async () => {
+      if (scope === 'learnings') {
+        // No fallback root for a foreign-root write: the caller must name it.
+        if (!requested.repoRoot?.trim()) throw new Error('repoRoot is required for scope=learnings');
+        return deps.runLearnings({ repoRoot, dryRun });
+      }
       if (scope === 'retros') return deps.runRetros(repoRoot);
       if (scope === 'retro-file') {
         if (!requested.filePath) throw new Error('filePath is required for scope=retro-file');
@@ -88,10 +98,12 @@ export function createReindexRoute(overrides: Partial<ReindexDeps> = {}) {
         t.Literal('all'),
         t.Literal('retros'),
         t.Literal('retro-file'),
+        t.Literal('learnings'),
       ])),
       filePath: t.Optional(t.String()),
       wait: t.Optional(t.Boolean()),
       append: t.Optional(t.Boolean()),
+      dryRun: t.Optional(t.Boolean()),
     })),
     detail: {
       tags: ['indexer'],
