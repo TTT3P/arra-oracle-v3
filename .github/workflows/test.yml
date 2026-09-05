@@ -94,7 +94,8 @@ jobs:
             tests/docs/ tests/config/ tests/process-manager/ tests/lifecycle/ \
             tests/smoke/ tests/export/ tests/services/ tests/knowledge/ tests/forum/ tests/eval/ \
             tests/bin/ tests/canvas/ tests/db/ tests/indexer/ tests/lib/ tests/oracles/ \
-            tests/runtime/ tests/search/ tests/server/ tests/util/ tests/vault/
+            tests/runtime/ tests/search/ tests/server/ tests/util/ tests/vault/ \
+            tests/learn/ tests/maintenance/ tests/mechanics/ tests/ops/
           do
             echo "::group::${group}"
             # Exit 133 is bun CRASHING (SIGTRAP), not a test failing — the two are
@@ -125,7 +126,7 @@ jobs:
           done
 
       # Deliberately NOT in the loop above:
-      #   tests/integration/  — one test needs a live docker compose stack (tracked separately)
+      #   tests/integration/  — docker-backed smokes (compose stack, README hero path); scheduled docker-hero-smoke.yml
       #   tests/benchmarks/   — timing-sensitive, belongs in a scheduled job not a PR gate
       #   tests/e2e/          — *.e2e.ts, needs a browser; not picked up by bun test anyway
       - name: Run scoped integration tests
