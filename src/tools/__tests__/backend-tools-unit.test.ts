@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,15 +15,7 @@ import { handleStats } from '../stats.ts';
 import { handleSupersede, runSupersede } from '../supersede.ts';
 
 
-// oracle_read lazily imports server/logging.ts (which opens the default storage and runs its
-// migrations) and vault/handler.ts on the first read. Under `bun test --isolate` every file is a
-// fresh process, so that cold import + transpile landed inside the FIRST read test's 5 s budget and
-// timed out on the CI runner (PR-gate runs 33971035968 / 33972148969) while passing locally. Warm
-// them here so a test measures the read, not the runtime's cold start. No timeout was raised.
-beforeAll(async () => {
-  await import('../../server/logging.ts');
-  await import('../../vault/handler.ts');
-});
+import './warm-read-deps.ts'; // cold-start guard for the first oracle_read test (see that file)
 
 const tempRoots: string[] = [];
 
