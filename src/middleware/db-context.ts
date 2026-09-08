@@ -1,9 +1,12 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Logger } from 'drizzle-orm/logger';
 import { requestIdFor } from './correlation.ts';
+import { seatIdentityFromHeaders } from './seat-identity.ts';
 
 export type DbRequestContext = {
   requestId: string;
+  /** Seat that claimed the request (x-oracle-seat); audit_log's `who` when present. */
+  actor?: string;
 };
 
 export type DbQueryTrace = DbRequestContext & {
@@ -27,12 +30,20 @@ export function currentDbRequestId(): string | undefined {
   return currentDbRequestContext()?.requestId;
 }
 
-export function runWithDbRequestContext<T>(requestId: string, callback: () => T): T {
-  return dbRequestContext.run({ requestId }, callback);
+export function currentDbActor(): string | undefined {
+  return currentDbRequestContext()?.actor;
+}
+
+export function runWithDbRequestContext<T>(requestId: string, callback: () => T, actor?: string): T {
+  return dbRequestContext.run(actor ? { requestId, actor } : { requestId }, callback);
 }
 
 export function createDbContextFetch(next: FetchHandler): FetchHandler {
-  return (request) => runWithDbRequestContext(requestIdFor(request), () => next(request));
+  return (request) => runWithDbRequestContext(
+    requestIdFor(request),
+    () => next(request),
+    seatIdentityFromHeaders(request.headers)?.seat,
+  );
 }
 
 export function setDbQueryTraceObserverForTests(observer?: DbQueryTraceObserver): () => void {
