@@ -29,6 +29,7 @@ export type RequestLogEntry = {
   correlationId: string;
   headers: Record<string, string>;
   sandbox: string;
+  seat?: { seat?: string; profile?: string; cwd?: string; tool?: string };
 };
 
 export const REQUEST_LOG_FORMATS = ['nginx', 'json', 'short'] as const;
@@ -92,6 +93,14 @@ function shortCorrelationId(correlationId: string): string {
   return correlationId.slice(0, 8);
 }
 
+/** `[seat=erpproject profile=owner tool=oracle_search cwd=/path]` — only the parts the caller sent. */
+function formatSeat(seat: NonNullable<RequestLogEntry['seat']>): string {
+  const parts = (['seat', 'profile', 'tool', 'cwd'] as const)
+    .filter((key) => seat[key])
+    .map((key) => `${key}=${seat[key]}`);
+  return `[${parts.join(' ')}]`;
+}
+
 export function formatRequestLog(entry: RequestLogEntry, format: RequestLogFormat): string {
   if (format === 'nginx') {
     return [
@@ -101,6 +110,7 @@ export function formatRequestLog(entry: RequestLogEntry, format: RequestLogForma
       formatDurationMs(entry.durationMs),
       `[${shortCorrelationId(entry.correlationId)}]`,
       `[${entry.sandbox}]`,
+      ...(entry.seat?.seat ? [formatSeat(entry.seat)] : []),
     ].join(' ');
   }
 

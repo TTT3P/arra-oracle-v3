@@ -1,6 +1,6 @@
 import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 import type { BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
-import { currentDbRequestId, type DbQueryObserver } from '../middleware/db-context.ts';
+import { currentDbRequestId, currentDbActor, type DbQueryObserver } from '../middleware/db-context.ts';
 
 export const auditLog = sqliteTable('audit_log', {
   id: integer('id').primaryKey({ autoIncrement: true }),
@@ -66,8 +66,9 @@ export function isAuditLogQuery(query: string): boolean {
     || new RegExp(`^delete\\s+from\\s+${auditTable}`).test(normalized);
 }
 
+/** Seat named by the request (x-oracle-seat) wins; otherwise the legacy 'http' / 'system'. */
 function defaultActor(requestId?: string): string {
-  return requestId ? 'http' : 'system';
+  return currentDbActor() ?? (requestId ? 'http' : 'system');
 }
 
 export function createAuditLogObserver(

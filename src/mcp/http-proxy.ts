@@ -2,6 +2,7 @@ import type { ToolResponse } from '../tools/types.ts';
 import { currentTenantId } from '../middleware/tenant.ts';
 import { mcpTenantHeaders, stripMcpTenantArgs, tenantIdFromMcpArgs } from './tenant.ts';
 import { mcpRestMapByName, type RemoteableMcpRestEntry } from '../tools/mcp-rest-map.ts';
+import { seatIdentityHeaders } from '../middleware/seat-identity.ts';
 
 const EMBEDDED_API_VALUES = new Set(['embedded', 'embed', 'off', 'none', 'false', '0']);
 
@@ -172,8 +173,12 @@ function toToolResponse(payload: unknown, isError = false): ToolResponse {
   };
 }
 
-function proxyHeaders(hasBody: boolean, tenantId?: string): Record<string, string> | undefined {
-  const headers: Record<string, string> = { ...mcpTenantHeaders(tenantId ?? currentTenantId()) };
+function proxyHeaders(hasBody: boolean, tenantId: string | undefined, toolName: string): Record<string, string> | undefined {
+  const headers: Record<string, string> = {
+    ...mcpTenantHeaders(tenantId ?? currentTenantId()),
+    // Who is calling: seat / profile / cwd / tool, from the seat's env (ORACLE_SEAT unset = none).
+    ...seatIdentityHeaders(toolName),
+  };
   if (hasBody) headers['content-type'] = 'application/json';
   const token = process.env.ARRA_API_TOKEN?.trim() || process.env.ARRA_API_KEY?.trim();
   if (token) headers.authorization = `Bearer ${token}`;
@@ -188,7 +193,7 @@ export async function proxyToolCall(baseUrl: string | null, toolName: string, ar
   try {
     const response = await oracleApiFetch(baseUrl, appendQuery(proxyRequest.path, proxyRequest.query), {
       method: proxyRequest.method,
-      headers: proxyHeaders(proxyRequest.body !== undefined, tenantId),
+      headers: proxyHeaders(proxyRequest.body !== undefined, tenantId, toolName),
       body: proxyRequest.body === undefined ? undefined : JSON.stringify(proxyRequest.body),
     });
     return toToolResponse(await readHttpPayload(response), !response.ok);

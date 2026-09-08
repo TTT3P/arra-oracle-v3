@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Elysia } from 'elysia';
 import { formatRequestLog, startupRequestLogFormat, type RequestLogFormat } from './logger.ts';
 import { SANDBOX_LABEL_HEADER, sandboxLabel } from '../runtime/sandbox-label.ts';
+import { seatIdentityFromHeaders, type SeatIdentity } from './seat-identity.ts';
 
 export type StructuredRequestLogEntry = {
   event: 'http_request';
@@ -13,6 +14,8 @@ export type StructuredRequestLogEntry = {
   correlationId: string;
   headers: Record<string, string>;
   sandbox: string;
+  /** Seat identity claimed by the caller (x-oracle-seat/-profile/-cwd/-tool); absent when none. */
+  seat?: SeatIdentity;
 };
 
 type RequestMeta = {
@@ -20,6 +23,7 @@ type RequestMeta = {
   correlationId: string;
   headers: Record<string, string>;
   sandbox: string;
+  seat?: SeatIdentity;
 };
 type LogSink = (entry: StructuredRequestLogEntry) => void;
 
@@ -83,7 +87,8 @@ export function createRequestLoggingMiddleware(options: RequestLoggingOptions = 
     .onRequest(({ request, set }) => {
       const correlationId = requestCorrelationId(request);
       const sandbox = sandboxLabel();
-      meta.set(request, { startedAt: now(), correlationId, headers: redactHeaders(request.headers), sandbox });
+      const seat = seatIdentityFromHeaders(request.headers);
+      meta.set(request, { startedAt: now(), correlationId, headers: redactHeaders(request.headers), sandbox, ...(seat ? { seat } : {}) });
       set.headers['X-Correlation-Id'] = correlationId;
       set.headers[SANDBOX_LABEL_HEADER] = sandbox;
     })
@@ -102,6 +107,7 @@ export function createRequestLoggingMiddleware(options: RequestLoggingOptions = 
         correlationId: requestMeta?.correlationId ?? requestCorrelationId(request),
         headers: requestMeta?.headers ?? redactHeaders(request.headers),
         sandbox: requestMeta?.sandbox ?? sandboxLabel(),
+        ...(requestMeta?.seat ? { seat: requestMeta.seat } : {}),
       });
       meta.delete(request);
     });
