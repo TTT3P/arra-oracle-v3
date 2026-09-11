@@ -11,6 +11,7 @@ import { compactSearchResults, parseSearchRetrievalMode } from '../../search/com
 import { rerankByEntityLinks } from '../../search/entity-ranking.ts';
 import { attachSupersedeStatus, supersedeWarnings } from '../../search/supersede-status.ts';
 import { handleSearch } from '../../server/handlers.ts';
+import { SearchOverloadedError } from '../../search/budget.ts';
 import { asOfResponse } from './asof.ts';
 import { SearchQuery } from './model.ts';
 import { parseOptionalSearchModel } from './model-key.ts';
@@ -86,7 +87,12 @@ export const searchEndpoint = new Elysia().get(
       if (compact) result.results = compact.results as unknown as typeof result.results;
       const metadata = compact ? { metadata: { ...('metadata' in result ? result.metadata as object : {}), retrieval: compact.metadata } } : {};
       return { ...result, ...metadata, query: sanitizedQ, ...(warnings.length ? { warnings: [...new Set(warnings)] } : {}), ...asOfResponse(asOf.value) };
-    } catch {
+    } catch (error) {
+      if (error instanceof SearchOverloadedError) {
+        set.status = 503;
+        set.headers['Retry-After'] = String(error.retryAfterSeconds);
+        return { results: [], total: 0, query: sanitizedQ, error: 'Search overloaded — retry later', inflight: error.inflight, maxInflight: error.maxInflight, retryAfterSeconds: error.retryAfterSeconds };
+      }
       set.status = 400;
       return { results: [], total: 0, query: sanitizedQ, error: 'Search failed' };
     }

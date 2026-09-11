@@ -5,6 +5,7 @@
  * since Drizzle doesn't support virtual tables.
  */
 
+import { budgetExceeded, searchAdmission, searchBudgetMs } from '../search/budget.ts';
 import fs from 'fs';
 import path from 'path';
 import { eq, sql, or } from 'drizzle-orm';
@@ -13,7 +14,7 @@ import { REPO_ROOT, VECTOR_URL } from '../config.ts';
 
 const currentRepoRoot = () => process.env.ORACLE_REPO_ROOT || REPO_ROOT;
 import { logSearch, logDocumentAccess, logLearning } from './logging.ts';
-import type { SearchResult, SearchResponse } from './types.ts';
+import type { SearchResult, SearchResponse, HandleSearchResponse } from './types.ts';
 import { ensureVectorStoreConnected, EMBEDDING_MODELS, getVectorStoreConfigByModel } from '../vector/factory.ts';
 import { localVectorOperations } from './vector-operations.ts';
 import { detectProject } from './project-detect.ts';
@@ -83,7 +84,26 @@ function runFtsAll<T>(stmt: { all: (...args: any[]) => T[] }, args: unknown[]): 
  * Search Oracle knowledge base with hybrid search (FTS5 + Vector)
  * HTTP server can safely use the configured vector store (LanceDB by default) directly since it's not an MCP server
  */
+/** Admission-gated search: SearchOverloadedError (503) beyond ORACLE_SEARCH_MAX_INFLIGHT instead of queueing. */
 export async function handleSearch(
+  query: string,
+  type: string = 'all',
+  limit: number = 10,
+  offset: number = 0,
+  mode: 'hybrid' | 'fts' | 'vector' = 'hybrid',
+  project?: string,
+  cwd?: string,
+  model?: string
+): Promise<HandleSearchResponse> {
+  const release = searchAdmission.acquire();
+  try {
+    return await handleSearchUnguarded(query, type, limit, offset, mode, project, cwd, model);
+  } finally {
+    release();
+  }
+}
+
+export async function handleSearchUnguarded(
   query: string,
   type: string = 'all',
   limit: number = 10,
@@ -92,7 +112,7 @@ export async function handleSearch(
   project?: string,  // If set: project + universal. If null/undefined: universal only
   cwd?: string,      // Auto-detect project from cwd if project not specified
   model?: string     // Embedding model: 'bge-m3' (default, multilingual) or 'nomic' (fast)
-): Promise<SearchResponse & { mode?: string; warning?: string; model?: string; vectorAvailable?: boolean }> {
+): Promise<HandleSearchResponse> {
   // Auto-detect project from cwd if not explicitly specified
   const resolvedProject = (project ?? detectProject(cwd))?.toLowerCase() ?? null;
   const startTime = Date.now();
@@ -204,6 +224,18 @@ export async function handleSearch(
     }
   }
 
+  // Budget checkpoint (OM-BL-2026-09-09-01): the FTS leg is synchronous and cannot be interrupted;
+  // if it already consumed the request budget, skip the vector leg and answer PARTIAL (FTS-only).
+  const budgetMs = searchBudgetMs();
+  let partial = false;
+  if (effectiveMode !== 'fts' && budgetExceeded(startTime, budgetMs)) {
+    partial = true;
+    effectiveMode = 'fts';
+    const elapsed = Date.now() - startTime;
+    const note = `search budget ${budgetMs}ms exceeded after FTS (${elapsed}ms); vector leg skipped — partial results`;
+    warning = warning ? `${warning}; ${note}` : note;
+  }
+
   // Vector search (skip if fts-only mode)
   let vectorResults: SearchResult[] = [];
   let remoteVectorTotal: number | undefined;
@@ -287,6 +319,7 @@ export async function handleSearch(
     mode: requestedMode,
     ...(model === 'multi' ? { model: 'multi' } : model && EMBEDDING_MODELS[model] ? { model } : {}),
     ...(requestedMode !== 'fts' ? { vectorAvailable } : {}),
+    ...(partial ? { partial: true, budgetMs, elapsedMs: searchTime } : {}),
     ...(warning && { warning })
   };
 }

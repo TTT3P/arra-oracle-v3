@@ -40,6 +40,9 @@ export interface SearchResponse {
   warnings?: string[];
 }
 
+/** handleSearch response; `partial` = budget ran out after the FTS leg, vector leg skipped (OM-BL-2026-09-09-01). */
+export type HandleSearchResponse = SearchResponse & { mode?: string; warning?: string; model?: string; vectorAvailable?: boolean; partial?: boolean; budgetMs?: number; elapsedMs?: number };
+
 export interface StatsResponse {
   total: number;
   by_type: Record<string, number>;
