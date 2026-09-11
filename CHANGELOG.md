@@ -6,6 +6,16 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### 2026-09-11 — oracle_handoff owner routing (OM-BL-2026-09-11-01)
+
+- `POST /api/handoff` accepts `memoryOwnerRoot` (same fail-closed containment as `POST /api/learn`:
+  absolute, real, contains `ψ/`, never the data dir) and writes under `<root>/ψ/inbox/handoff`,
+  echoing the resolved `memoryOwnerRoot`; absent field keeps the legacy server root.
+- MCP proxy: `oracle_handoff` is `owner-rooted` — a bound seat forwards its `ORACLE_MEMORY_OWNER_ROOT`
+  like `oracle_learn`; if the owner core answers success without echoing `memoryOwnerRoot`, the call
+  is reported as `misrouted` (error) instead of a silent write into the server root.
+- Local MCP tool: a bound seat's handoff lands under its own ψ (seam outranks vault/cwd).
+
 ### 2026-06-15 session wave — unified surfaces, coverage, and UI
 
 34 PRs merged into `alpha` on 2026-06-15 (13:16-15:52 UTC). Each PR is

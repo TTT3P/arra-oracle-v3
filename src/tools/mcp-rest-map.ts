@@ -1,5 +1,5 @@
 export type McpRestMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE';
-export type McpRestBodyMode = 'args' | 'learn' | 'retro-file' | 'thread-message' | 'thread-status' | 'trace-link' | 'trace-distill';
+export type McpRestBodyMode = 'args' | 'learn' | 'owner-rooted' | 'retro-file' | 'thread-message' | 'thread-status' | 'trace-link' | 'trace-distill';
 
 export type McpRestQueryBinding = Readonly<{
   arg: string;
@@ -77,7 +77,9 @@ const mcpRestMapEntries = [
   { name: 'oracle_concepts', remoteable: true, method: 'GET', path: '/api/concepts', query: [{ arg: 'type', param: 'type' }, { arg: 'limit', param: 'limit' }] },
   { name: 'oracle_supersede', remoteable: true, method: 'POST', path: '/api/supersede/document', body: 'args' },
   { name: 'oracle_research_note', remoteable: true, method: 'POST', path: '/api/research/note', body: 'args' },
-  { name: 'oracle_handoff', remoteable: true, method: 'POST', path: '/api/handoff', body: 'args' },
+  // 'owner-rooted': args + the seat's ORACLE_MEMORY_OWNER_ROOT (OM-BL-2026-09-11-01: a bound seat's handoff
+  // must land in its own ψ, not the owner core's data dir — same seam as oracle_learn).
+  { name: 'oracle_handoff', remoteable: true, method: 'POST', path: '/api/handoff', body: 'owner-rooted' },
   { name: 'oracle_inbox', remoteable: true, method: 'GET', path: '/api/inbox', query: pagingQuery },
   { name: 'oracle_thread', remoteable: true, method: 'POST', path: '/api/thread', body: 'thread-message' },
   { name: 'oracle_threads', remoteable: true, method: 'GET', path: '/api/threads', query: [{ arg: 'status', param: 'status' }, { arg: 'limit', param: 'limit' }, { arg: 'offset', param: 'offset' }] },

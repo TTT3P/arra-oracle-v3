@@ -18,6 +18,8 @@ export const LearnBody = t.Object({
 export const HandoffBody = t.Object({
   content: t.Optional(t.String({ minLength: 1 })),
   slug: t.Optional(t.String()),
+  /** Absolute memory-owner root of a proxied seat; the file is written under <root>/ψ/inbox/handoff. */
+  memoryOwnerRoot: t.Optional(t.String()),
 });
 
 export const InboxQuery = t.Object({
