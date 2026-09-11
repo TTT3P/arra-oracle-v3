@@ -111,9 +111,19 @@ export async function handleHandoff(ctx: ToolContext, input: OracleHandoffInput)
 
   const project = detectProject(ctx.repoRoot)?.toLowerCase() || '_universal';
 
+  // Seat→memory-owner seam (OM-BL-2026-09-11-01, mirrors tools/learn.ts): a bound seat's handoff lands
+  // under its own ψ — the policy-projected binding outranks a vault or the MCP server's cwd.
+  const memoryOwnerRoot = process.env.ORACLE_MEMORY_OWNER_ROOT?.trim() || null;
+  if (memoryOwnerRoot && vaultRoot) {
+    console.error('[Handoff] ORACLE_MEMORY_OWNER_ROOT set — vault route overridden by the memory-owner seam');
+  }
+
   let dirPath: string;
   let sourceFileRel: string;
-  if (vaultRoot) {
+  if (memoryOwnerRoot) {
+    dirPath = path.join(memoryOwnerRoot, 'ψ', 'inbox', 'handoff');
+    sourceFileRel = `ψ/inbox/handoff/${filename}`;
+  } else if (vaultRoot) {
     dirPath = path.join(vaultRoot, project, 'ψ', 'inbox', 'handoff');
     sourceFileRel = `${project}/ψ/inbox/handoff/${filename}`;
   } else {

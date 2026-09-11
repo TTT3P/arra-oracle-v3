@@ -100,9 +100,10 @@ function bodyFromMap(entry: RemoteableMcpRestEntry, args: Record<string, unknown
   switch (entry.body) {
     case undefined: return undefined;
     case 'args': return args;
-    case 'learn': {
-      // A proxied seat's learning file must land in the seat's memory tree, not the
-      // owner core's data dir: forward the seat's ORACLE_MEMORY_OWNER_ROOT (audit 2026-09-05).
+    case 'learn':
+    case 'owner-rooted': {
+      // A proxied seat's file must land in the seat's memory tree, not the owner core's data dir:
+      // forward the seat's ORACLE_MEMORY_OWNER_ROOT (learn: audit 2026-09-05; handoff: OM-BL-2026-09-11-01).
       // A bound seat always forwards its binding — a caller argument cannot redirect it (Riddler PR#20 F2).
       const ownerRoot = process.env.ORACLE_MEMORY_OWNER_ROOT?.trim();
       return ownerRoot ? { ...args, memoryOwnerRoot: ownerRoot } : args;
@@ -185,6 +186,20 @@ function proxyHeaders(hasBody: boolean, tenantId: string | undefined, toolName: 
   return Object.keys(headers).length ? headers : undefined;
 }
 
+/**
+ * Fail-closed owner-root contract check (OM-BL-2026-09-11-01): when the seat forwarded its bound
+ * memoryOwnerRoot and the owner core reports a successful write WITHOUT echoing a memoryOwnerRoot,
+ * the server predates owner routing for that tool and wrote into ITS root — report it as misrouted
+ * instead of a silent success (the cookbook incident, 2026-09-11).
+ */
+export function ownerRootMisrouted(body: unknown, payload: unknown): boolean {
+  if (!body || typeof body !== 'object' || typeof (body as Record<string, unknown>).memoryOwnerRoot !== 'string') return false;
+  if (!payload || typeof payload !== 'object') return false;
+  const p = payload as Record<string, unknown>;
+  if (p.success !== true) return false;
+  return typeof p.memoryOwnerRoot !== 'string' || !p.memoryOwnerRoot.trim();
+}
+
 export async function proxyToolCall(baseUrl: string | null, toolName: string, args: Record<string, unknown>, tenantId = tenantIdFromMcpArgs(args)): Promise<ToolResponse | null> {
   if (!baseUrl) return null;
   const cleanArgs = stripMcpTenantArgs(args);
@@ -196,7 +211,17 @@ export async function proxyToolCall(baseUrl: string | null, toolName: string, ar
       headers: proxyHeaders(proxyRequest.body !== undefined, tenantId, toolName),
       body: proxyRequest.body === undefined ? undefined : JSON.stringify(proxyRequest.body),
     });
-    return toToolResponse(await readHttpPayload(response), !response.ok);
+    const payload = await readHttpPayload(response);
+    if (response.ok && ownerRootMisrouted(proxyRequest.body, payload)) {
+      const file = (payload as Record<string, unknown>).file;
+      return toToolResponse({
+        ...(payload as Record<string, unknown>),
+        success: false,
+        misrouted: true,
+        error: `owner core did not honour memoryOwnerRoot for ${toolName}: the file was written under the SERVER root${typeof file === 'string' ? ` (${file})` : ''}, not this seat's memory tree. Recover by writing the file directly under your own ψ (/forward); report the server revision to oracle-maint.`,
+      }, true);
+    }
+    return toToolResponse(payload, !response.ok);
   } catch (err) {
     if (err instanceof OracleApiUnavailableError) return toToolResponse(err.message, true);
     throw err;
