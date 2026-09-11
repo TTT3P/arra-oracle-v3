@@ -6,6 +6,19 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### 2026-09-11 — HTTP idle timeout + search budget/admission (OM-BL-2026-09-09-01)
+
+- `Bun.serve` now runs with `idleTimeout` = `ORACLE_HTTP_IDLE_TIMEOUT_S` (default 255, the Bun maximum)
+  instead of Bun's 10 s default, which cut clients (`http=000`) while a synchronous FTS5 scan was still
+  running.
+- `GET /api/search`: per-request budget `ORACLE_SEARCH_BUDGET_MS` (default 20000) — when the FTS leg has
+  already spent it, the vector leg is skipped and the response carries `partial: true`, `budgetMs`,
+  `elapsedMs` and a warning (FTS-only results, never a hang).
+- Admission gate `ORACLE_SEARCH_MAX_INFLIGHT` (default 4): additional searches answer `503` with
+  `Retry-After` immediately instead of queueing behind in-flight scans.
+- Known limit: bun:sqlite has no interrupt, so a running FTS statement itself is not cut short; moving
+  the scan off the event loop is a separate change.
+
 ### 2026-06-15 session wave — unified surfaces, coverage, and UI
 
 34 PRs merged into `alpha` on 2026-06-15 (13:16-15:52 UTC). Each PR is
