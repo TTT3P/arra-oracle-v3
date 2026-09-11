@@ -30,7 +30,7 @@ import { readStartupDbStatus, runtimeMiddleware } from './lifecycle/startup-cont
 import { createRequestLoggingMiddleware } from './middleware/request-logger.ts';
 import { createApiVersionHeaderMiddleware, createApiVersionedFetch } from './middleware/api-version.ts';
 import { createSecurityHeadersMiddleware } from './middleware/security-headers.ts';
-import { createRequestTimeoutFetch } from './middleware/timeout.ts';
+import { createRequestTimeoutFetch, httpIdleTimeoutSeconds } from './middleware/timeout.ts';
 import { createBodyLimitMiddleware } from './middleware/body-limit.ts';
 import { createRateLimiterMiddleware } from './middleware/rate-limiter.ts';
 import { createResponseFormatMiddleware } from './middleware/response-format.ts';
@@ -83,7 +83,7 @@ import { simpleModeResponse } from './simple-mode.ts';
 import pkg from '../package.json' with { type: 'json' };
 
 type UnifiedRuntime = Awaited<ReturnType<typeof loadUnifiedPlugins>>;
-type ServerSpec = { hostname: string; port: number; fetch(request: Request, server?: ReturnType<typeof Bun.serve>): Response | Promise<Response> };
+type ServerSpec = { hostname: string; port: number; idleTimeout: number; fetch(request: Request, server?: ReturnType<typeof Bun.serve>): Response | Promise<Response> };
 type ElysiaApp = Elysia<any, any, any, any, any, any, any>;
 type RouteModule = Parameters<ElysiaApp['use']>[0];
 export interface StartServerOptions { writePidFile?: boolean }
@@ -245,7 +245,7 @@ export async function createStartedApp(options: StartServerOptions = {}): Promis
   await announceStartup(app, startupConfig);
   const serverFetch = createRequestTimeoutFetch(createRequestDedupFetch(createApiVersionedFetch(createTenantFetch(createDbContextFetch((request: Request) => app.fetch(request))))));
   // Client address is resolved here, on the ORIGINAL request (wrappers below clone it), and carried by AsyncLocalStorage.
-  return { hostname: resolveBindHost(), port: Number(PORT), fetch: (request, server) => runWithRemoteAddress(resolveRemoteAddress(server, request), () => drainingResponseFor(request) ?? trackRequest(() => serverFetch(request))) };
+  return { hostname: resolveBindHost(), port: Number(PORT), idleTimeout: httpIdleTimeoutSeconds(), fetch: (request, server) => runWithRemoteAddress(resolveRemoteAddress(server, request), () => drainingResponseFor(request) ?? trackRequest(() => serverFetch(request))) };
 }
 
 function resetIndexerStatus(): void {
