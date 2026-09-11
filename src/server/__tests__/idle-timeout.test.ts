@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { BUN_MAX_IDLE_TIMEOUT_S, DEFAULT_HTTP_IDLE_TIMEOUT_S, httpIdleTimeoutSeconds } from '../idle-timeout.ts';
+import { BUN_MAX_IDLE_TIMEOUT_S, DEFAULT_HTTP_IDLE_TIMEOUT_S, httpIdleTimeoutSeconds } from '../../middleware/timeout.ts';
 
 describe('httpIdleTimeoutSeconds', () => {
   test('defaults to the Bun maximum (255 s) so a slow synchronous request is not cut at Bun\'s 10 s default', () => {

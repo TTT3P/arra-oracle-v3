@@ -1,4 +1,3 @@
-import { httpIdleTimeoutSeconds } from './server/idle-timeout.ts';
 import { Elysia } from 'elysia';
 import { join } from 'node:path';
 import { swagger } from '@elysiajs/swagger';
@@ -31,7 +30,7 @@ import { readStartupDbStatus, runtimeMiddleware } from './lifecycle/startup-cont
 import { createRequestLoggingMiddleware } from './middleware/request-logger.ts';
 import { createApiVersionHeaderMiddleware, createApiVersionedFetch } from './middleware/api-version.ts';
 import { createSecurityHeadersMiddleware } from './middleware/security-headers.ts';
-import { createRequestTimeoutFetch } from './middleware/timeout.ts';
+import { createRequestTimeoutFetch, httpIdleTimeoutSeconds } from './middleware/timeout.ts';
 import { createBodyLimitMiddleware } from './middleware/body-limit.ts';
 import { createRateLimiterMiddleware } from './middleware/rate-limiter.ts';
 import { createResponseFormatMiddleware } from './middleware/response-format.ts';

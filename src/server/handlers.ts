@@ -14,7 +14,7 @@ import { REPO_ROOT, VECTOR_URL } from '../config.ts';
 
 const currentRepoRoot = () => process.env.ORACLE_REPO_ROOT || REPO_ROOT;
 import { logSearch, logDocumentAccess, logLearning } from './logging.ts';
-import type { SearchResult, SearchResponse } from './types.ts';
+import type { SearchResult, SearchResponse, HandleSearchResponse } from './types.ts';
 import { ensureVectorStoreConnected, EMBEDDING_MODELS, getVectorStoreConfigByModel } from '../vector/factory.ts';
 import { localVectorOperations } from './vector-operations.ts';
 import { detectProject } from './project-detect.ts';
@@ -84,16 +84,7 @@ function runFtsAll<T>(stmt: { all: (...args: any[]) => T[] }, args: unknown[]): 
  * Search Oracle knowledge base with hybrid search (FTS5 + Vector)
  * HTTP server can safely use the configured vector store (LanceDB by default) directly since it's not an MCP server
  */
-export type HandleSearchResponse = SearchResponse & {
-  mode?: string; warning?: string; model?: string; vectorAvailable?: boolean;
-  /** Set when the per-request budget ran out after the FTS leg and the vector leg was skipped. */
-  partial?: boolean; budgetMs?: number; elapsedMs?: number;
-};
-
-/**
- * Admission-gated search: refuses with SearchOverloadedError (503) when more than
- * ORACLE_SEARCH_MAX_INFLIGHT searches are already in flight, instead of queueing behind them.
- */
+/** Admission-gated search: SearchOverloadedError (503) beyond ORACLE_SEARCH_MAX_INFLIGHT instead of queueing. */
 export async function handleSearch(
   query: string,
   type: string = 'all',
