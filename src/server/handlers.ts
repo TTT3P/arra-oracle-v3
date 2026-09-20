@@ -84,7 +84,29 @@ function runFtsAll<T>(stmt: { all: (...args: any[]) => T[] }, args: unknown[]): 
  * Search Oracle knowledge base with hybrid search (FTS5 + Vector)
  * HTTP server can safely use the configured vector store (LanceDB by default) directly since it's not an MCP server
  */
-/** Admission-gated search: SearchOverloadedError (503) beyond ORACLE_SEARCH_MAX_INFLIGHT instead of queueing. */
+/**
+ * Admission-gated search: SearchOverloadedError (503) beyond ORACLE_SEARCH_MAX_INFLIGHT instead of
+ * queueing.
+ *
+ * Live-HTTP enforcement fix (OM-BL-2026-09-20-02): acquire() bounds `inflight`, but that counter
+ * only reflects real concurrency across the window between acquire and release. When a search runs
+ * FULLY SYNCHRONOUSLY — effectiveMode 'fts' (vector section disabled, local index missing, or the
+ * embedder degraded), so there is no awaited embed leg — the whole critical section executes in one
+ * uninterrupted event-loop turn. Real concurrent HTTP requests then serialize: each acquires and
+ * releases before the next is dispatched, so inflight never reaches the limit and the gate never
+ * sheds load (observed live: 8 concurrent /api/search → 8×200, 0×503, even with the sidecar's
+ * ORACLE_SEARCH_MAX_INFLIGHT=2). Searches that DO perform async embed work (proxy or local) yield
+ * naturally and were already bounded (verified: 2 admitted + 6×503 on a real server at 0–200ms
+ * embed latency); this gap was specific to the synchronous FTS-only path.
+ *
+ * The fix: yield the event loop once, while holding the slot, before the synchronous FTS scan. That
+ * lets concurrently-arrived requests register against `inflight` before any one of them monopolizes
+ * the loop, so admission reflects true concurrent load in every mode. Cost: one macrotask hop per
+ * search (sub-millisecond) and load-shedding of concurrent bursts above the limit even when each
+ * query is individually cheap — which is exactly the gate's stated contract ("max concurrently
+ * admitted searches"). setImmediate is a lower-latency, less-aggressive alternative (sheds as slots
+ * free) if burst availability is preferred over strict per-instant bounding.
+ */
 export async function handleSearch(
   query: string,
   type: string = 'all',
@@ -97,6 +119,7 @@ export async function handleSearch(
 ): Promise<HandleSearchResponse> {
   const release = searchAdmission.acquire();
   try {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     return await handleSearchUnguarded(query, type, limit, offset, mode, project, cwd, model);
   } finally {
     release();
