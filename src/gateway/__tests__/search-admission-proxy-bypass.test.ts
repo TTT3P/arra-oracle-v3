@@ -14,7 +14,15 @@ import { describe, expect, test } from 'bun:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadGatewayConfig, compileRoutes, matchRoute } from '../index.ts';
+
+// Set a self-contained HOME/data-dir BEFORE importing the gateway module, so module-load-time
+// validation (real-home checks) passes in a restricted seat. Import dynamically after.
+const fixtureHome = fs.mkdtempSync(path.join(os.tmpdir(), 'arra-gw-home-'));
+process.env.HOME = fixtureHome;
+process.env.ORACLE_DATA_DIR = path.join(fixtureHome, 'data');
+process.env.ORACLE_DB_PATH = path.join(fixtureHome, 'data', 'oracle.db');
+
+const { loadGatewayConfig, compileRoutes, matchRoute } = await import('../index.ts');
 
 describe('gateway proxies /api/search past the main-server admission gate', () => {
   test('VECTOR_URL synthesizes an /api/search → vector proxy route (non-local)', () => {
