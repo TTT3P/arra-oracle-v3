@@ -178,6 +178,7 @@ export function gatewayPlugin(dataDir: string, vectorUrl?: string) {
 
       // ── Proxy ──
       let response: Response;
+      const proxyStart = performance.now();
       try {
         response = await proxyToService(request, service);
       } catch (err) {
@@ -211,8 +212,9 @@ export function gatewayPlugin(dataDir: string, vectorUrl?: string) {
       }
 
       // Record a gateway-proxied /api/search once, here on the writable main (the readonly sidecar
-      // that served it skips logSearch). Best-effort — never breaks the proxy. (OM-BL-2026-09-20-04)
-      await logProxiedSearch(url, response);
+      // that served it skips logSearch). Best-effort — never breaks the proxy. search_time_ms is the
+      // gateway-measured proxy round-trip (the response body carries no duration). (OM-BL-2026-09-20-04)
+      await logProxiedSearch(url, response, performance.now() - proxyStart);
 
       return response;
     });

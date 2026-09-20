@@ -12,9 +12,15 @@
  * still logs via handleSearch, and the readonly sidecar logs nothing), so there is no double count.
  */
 import { logSearch } from '../server/logging.ts';
+import { detectProject } from '../server/project-detect.ts';
 import type { SearchResult } from '../server/types.ts';
 
-export async function logProxiedSearch(url: URL, response: Response): Promise<void> {
+/**
+ * @param elapsedMs the gateway-measured proxy round-trip duration (the truthful search_time_ms).
+ *   The proxied response body does NOT carry a duration for normal responses (handlers.ts only
+ *   sets elapsedMs on PARTIAL/budget-exceeded responses), so it must be measured here, not read.
+ */
+export async function logProxiedSearch(url: URL, response: Response, elapsedMs: number): Promise<void> {
   try {
     if (response.status !== 200) return;
     const canonicalPath = url.pathname.replace(/^\/api\/v[^/]+(?=\/)/, '/api');
@@ -22,15 +28,18 @@ export async function logProxiedSearch(url: URL, response: Response): Promise<vo
     const q = url.searchParams.get('q')?.trim();
     if (!q) return;
     const body = (await response.clone().json().catch(() => null)) as
-      | { results?: unknown[]; total?: number; mode?: string; elapsedMs?: number }
+      | { results?: unknown[]; total?: number; mode?: string }
       | null;
     if (!body || !Array.isArray(body.results)) return;
     const type = url.searchParams.get('type') ?? 'all';
     const mode = url.searchParams.get('mode') ?? (typeof body.mode === 'string' ? body.mode : 'hybrid');
     const total = typeof body.total === 'number' ? body.total : body.results.length;
-    const elapsed = typeof body.elapsedMs === 'number' ? body.elapsedMs : 0;
-    const project = url.searchParams.get('project') ?? undefined;
-    logSearch(q, type, mode, total, elapsed, body.results as SearchResult[], project);
+    // Resolve project the SAME way as handlers.ts:139 — cwd fallback + lowercase — so proxied rows
+    // match the scope/normalization of locally-served rows.
+    const rawProject = url.searchParams.get('project') ?? undefined;
+    const rawCwd = url.searchParams.get('cwd') ?? undefined;
+    const project = (rawProject ?? detectProject(rawCwd))?.toLowerCase() ?? undefined;
+    logSearch(q, type, mode, total, Math.max(0, Math.round(elapsedMs)), body.results as SearchResult[], project);
   } catch {
     /* logging must never break the proxy */
   }
