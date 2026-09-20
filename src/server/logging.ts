@@ -5,9 +5,21 @@
  */
 
 import { eq, sql } from 'drizzle-orm';
-import { db, searchLog, documentAccess, learnLog, oracleDocuments } from '../db/index.ts';
+import { db, searchLog, documentAccess, learnLog, oracleDocuments, defaultStorageReadonly } from '../db/index.ts';
 import type { SearchResult } from './types.ts';
 import { tenantIdForWrite } from '../middleware/tenant.ts';
+
+/**
+ * Count of logDocumentAccess calls skipped because the DB handle is readonly
+ * (ORACLE_VECTOR_READONLY / ORACLE_READ_ONLY — the proxied / read-mostly sidecar). Observability
+ * for a KNOWN CENSUS LIMITATION: usage_count and last_accessed_at are NOT recorded for searches
+ * served by a readonly sidecar, so the "never read" census undercounts read activity on those
+ * paths. CROO owns the census caveat. Read via documentAccessReadonlySkipCount().
+ */
+let documentAccessReadonlySkips = 0;
+export function documentAccessReadonlySkipCount(): number {
+  return documentAccessReadonlySkips;
+}
 
 /**
  * Log search query with full details
@@ -91,6 +103,17 @@ export function bumpDocumentUsage(documentId: string, now = Date.now()) {
 }
 
 export function logDocumentAccess(documentId: string, accessType: string, project?: string) {
+  // On a readonly sidecar every write below throws SQLITE_READONLY on every proxied search result
+  // (observed live: 34,690×). Skip cleanly under the single readonly check and count the skip so the
+  // census gap is observable. KNOWN LIMITATION: usage_count / last_accessed_at are therefore not
+  // recorded for readonly-sidecar (proxied) searches — see documentAccessReadonlySkipCount above.
+  if (defaultStorageReadonly()) {
+    if (documentAccessReadonlySkips === 0) {
+      console.error('[DB] readonly handle — skipping document access/usage writes; usage_count & last_accessed_at will not update for these searches (known census limitation, OM-BL-2026-09-20-03)');
+    }
+    documentAccessReadonlySkips += 1;
+    return;
+  }
   try {
     db.insert(documentAccess).values({
       documentId,
