@@ -16,6 +16,7 @@ import { applyEntityLinkBoost, hasEntityLinkSearchHook, queryEntityLinks } from 
 import { searchFts, mapFtsResults, enrichSupersedeFlags } from './fts.ts';
 import { applyRecencyBoost, attachSearchEvidence, combineResults, sanitizeFtsQuery } from './helpers.ts';
 import { vectorSearch } from './vector.ts';
+import { searchAdmission } from '../../search/budget.ts';
 
 let logSearchFn: typeof import('../../server/logging.ts').logSearch | null = null;
 async function loadLogSearch(): Promise<typeof import('../../server/logging.ts').logSearch> {
@@ -23,7 +24,29 @@ async function loadLogSearch(): Promise<typeof import('../../server/logging.ts')
   return logSearchFn;
 }
 
+/**
+ * Admission-gated MCP local search (OM-BL-2026-09-20-01).
+ *
+ * The embedded/local search path (read-mostly + delegate seats, where search stays local
+ * by the Riddler-R1-verified design in src/mcp/http-proxy.ts — search/read do NOT proxy)
+ * was previously unbounded: N concurrent oracle_search calls each fired their own embed
+ * against OLLAMA_BASE_URL with no cap, so 8-parallel searches piled concurrent embeds onto
+ * the (single) remote/GPU tunnel and collapsed latency. It shares the SAME process-wide
+ * `searchAdmission` singleton as the HTTP handler (src/server/handlers.ts) so a process that
+ * serves both surfaces has one choke point. Beyond ORACLE_SEARCH_MAX_INFLIGHT this throws
+ * SearchOverloadedError instead of queueing — fail fast rather than pile up multi-second
+ * embeds. Tune the limit per seat via ORACLE_SEARCH_MAX_INFLIGHT.
+ */
 export async function handleSearch(ctx: ToolContext, input: OracleSearchInput): Promise<ToolResponse> {
+  const release = searchAdmission.acquire();
+  try {
+    return await handleSearchUnguarded(ctx, input);
+  } finally {
+    release();
+  }
+}
+
+async function handleSearchUnguarded(ctx: ToolContext, input: OracleSearchInput): Promise<ToolResponse> {
   const startTime = Date.now();
   const { query, type = 'all', limit = 5, offset = 0, mode = 'hybrid', project, cwd, model } = input;
   if (!query || query.trim().length === 0) throw new Error('Query cannot be empty');
