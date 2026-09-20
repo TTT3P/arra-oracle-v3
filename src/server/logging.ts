@@ -33,6 +33,11 @@ export function logSearch(
   results: SearchResult[] = [],
   project?: string
 ) {
+  // On a readonly sidecar (ORACLE_VECTOR_READONLY / ORACLE_READ_ONLY) this insert throws
+  // SQLITE_READONLY once per gateway-proxied search AND the search goes unlogged. Skip cleanly here;
+  // the proxied search is instead logged exactly once on the writable core at the gateway/proxy
+  // layer (src/gateway/proxied-search-log.ts, OM-BL-2026-09-20-04). Reuses the single readonly check.
+  if (defaultStorageReadonly()) return;
   try {
     // Store top 5 results as JSON (id, type, score, snippet)
     const resultsJson = results.length > 0

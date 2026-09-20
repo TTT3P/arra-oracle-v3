@@ -17,6 +17,7 @@ import { proxyToService } from './proxy.ts';
 import { HealthRegistry, type ServiceHealth } from './health.ts';
 import { runHooks, type GatewayContext } from './hooks.ts';
 import { createGatewayState, describeGatewayState, type GatewayState } from './state.ts';
+import { logProxiedSearch } from './proxied-search-log.ts';
 
 // Register built-in hooks (side-effect imports)
 import './hooks/request-logger.ts';
@@ -208,6 +209,10 @@ export function gatewayPlugin(dataDir: string, vectorUrl?: string) {
         if (ctx.meta.fallback_to_local) return;
         throw err;
       }
+
+      // Record a gateway-proxied /api/search once, here on the writable main (the readonly sidecar
+      // that served it skips logSearch). Best-effort — never breaks the proxy. (OM-BL-2026-09-20-04)
+      await logProxiedSearch(url, response);
 
       return response;
     });
