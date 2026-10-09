@@ -64,19 +64,19 @@ for (const [name, script] of [['owner', OWNER], ['read-mostly', READ_MOSTLY]] as
       expect(env.ORACLE_RETRIEVE_DEPTH).toBe('42');
     });
 
-    test('unset OLLAMA_FALLBACK_BASE_URLS → defaults to the CPU fallback', () => {
+    test('unset OLLAMA_FALLBACK_BASE_URLS → defaults to the GPU tunnel fallback (BL-229)', () => {
       const env = runLauncher(script, {});
-      expect(env.OLLAMA_FALLBACK_BASE_URLS).toBe('http://127.0.0.1:11434');
+      expect(env.OLLAMA_FALLBACK_BASE_URLS).toBe('http://127.0.0.1:11435');
     });
 
     test('explicit EMPTY OLLAMA_FALLBACK_BASE_URLS stays empty (no-fallback preserved)', () => {
       const env = runLauncher(script, { OLLAMA_FALLBACK_BASE_URLS: '' });
-      expect(env.OLLAMA_FALLBACK_BASE_URLS).toBe(''); // present but empty, NOT clobbered to :11434
+      expect(env.OLLAMA_FALLBACK_BASE_URLS).toBe(''); // present but empty, NOT clobbered to a default
     });
 
-    test('OLLAMA_BASE_URL defaults to the GPU tunnel :11435', () => {
+    test('OLLAMA_BASE_URL defaults to the Mac CPU :11434 (BL-229, TINE 2026-10-09)', () => {
       const env = runLauncher(script, {});
-      expect(env.OLLAMA_BASE_URL).toBe('http://127.0.0.1:11435');
+      expect(env.OLLAMA_BASE_URL).toBe('http://127.0.0.1:11434');
     });
   });
 }

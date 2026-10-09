@@ -41,12 +41,13 @@ export ORACLE_VECTOR_DB="${ORACLE_VECTOR_DB:-lancedb}"
 export ORACLE_VECTOR_DB_PATH="${ORACLE_VECTOR_DB_PATH:-$ORACLE_DATA_DIR/lancedb}"
 export ORACLE_EMBEDDER="${ORACLE_EMBEDDER:-ollama}"
 export ORACLE_EMBEDDING_MODEL="${ORACLE_EMBEDDING_MODEL:-bge-m3}"
-# Local search embeds here (read-mostly search does not proxy — see above). Default to the remote
-# CUDA GPU tunnel (:11435, ~307ms) with the local Mac CPU ollama (:11434, ~1650ms = 5x) as fallback.
-export OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11435}"
+# Local search embeds here (read-mostly search does not proxy — see above). Default to the local Mac
+# CPU ollama (:11434) — reliable, no VRAM contention with ComfyUI (BL-229, TINE word 2026-10-09). The
+# win CUDA GPU tunnel (:11435) stays available as a fallback / explicit drain burst, NOT the default.
+export OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
 # ${VAR-default} (no colon): unset → default, but an explicit EMPTY value (deliberate
 # no-fallback) is preserved rather than clobbered (consumer: src/vector/ollama-url-chain.ts:21).
-export OLLAMA_FALLBACK_BASE_URLS="${OLLAMA_FALLBACK_BASE_URLS-http://127.0.0.1:11434}"
+export OLLAMA_FALLBACK_BASE_URLS="${OLLAMA_FALLBACK_BASE_URLS-http://127.0.0.1:11435}"
 # Apply the retrieve-depth default only when NEITHER the current var NOR the legacy
 # ORACLE_SEARCH_RETRIEVE_DEPTH is set — the consumer (src/search/retrieve-depth.ts:4-6) reads
 # both, so a seat that explicitly set the legacy var must not be shadowed.

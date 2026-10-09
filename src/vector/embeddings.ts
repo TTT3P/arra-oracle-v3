@@ -49,7 +49,7 @@ export class OllamaEmbeddings implements EmbeddingProvider {
     this.retryDelayMs = positiveInt(process.env.ORACLE_EMBED_RETRY_DELAY_MS, 150);
     this.batchSize = positiveInt(process.env.ORACLE_EMBED_BATCH_SIZE, 50);
     this.timeoutMs = positiveInt(process.env.ORACLE_EMBED_TIMEOUT_MS, 30_000);
-    this.keepAlive = parseKeepAlive(process.env.ORACLE_EMBED_KEEP_ALIVE);
+    this.keepAlive = resolveEmbedKeepAlive(this.baseUrl, process.env.ORACLE_EMBED_KEEP_ALIVE);
     this.declaredDims = KNOWN_DIMS[this.model];
     this.dimensions = this.declaredDims || 768;
   }
@@ -162,6 +162,26 @@ export function parseKeepAlive(raw: string | undefined): number | string {
   const value = raw?.trim();
   if (!value) return -1;
   return /^-?\d+$/.test(value) ? Number(value) : value;
+}
+
+/** The remote win-GPU ollama is reached via the :11435 SSH tunnel (codebase convention; it and the
+ *  local Mac CPU both answer on 127.0.0.1, so the PORT is the only discriminator). Pinning the model
+ *  there holds GPU VRAM between calls, which ComfyUI (priority 1) needs. */
+export function isWinGpuTunnel(baseUrl: string): boolean {
+  try { return new URL(baseUrl).port === '11435'; } catch { return /:11435(\/|$)/.test(baseUrl); }
+}
+
+/** keep_alive resolution (BL-229, TINE 2026-10-09). Residency is DESIRABLE on the local Mac CPU
+ *  (:11434, RAM — avoids per-call reload), so CPU/local URLs keep the configured default
+ *  (parseKeepAlive; default -1 = resident). The win GPU tunnel (:11435) must NEVER hold VRAM between
+ *  calls, so it is forced to 0 — UNLESS an operator explicitly set a non-negative keep_alive (e.g.
+ *  ORACLE_EMBED_KEEP_ALIVE=30 for a deliberate off-peak drain burst), which is honored as bounded
+ *  residency that releases after idle. This client-side rule holds even if the win server's own
+ *  OLLAMA_KEEP_ALIVE default is not in force (scheduled-task launch, not editable without admin). */
+export function resolveEmbedKeepAlive(baseUrl: string, raw: string | undefined): number | string {
+  const k = parseKeepAlive(raw);
+  if (!isWinGpuTunnel(baseUrl)) return k;
+  return (typeof k === 'number' && k >= 0) ? k : 0;
 }
 function positiveInt(raw: string | undefined, fallback: number): number {
   if (!raw) return fallback;
