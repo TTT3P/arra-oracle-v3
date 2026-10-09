@@ -10,6 +10,8 @@ import { replaceDocumentPointers } from '../../search/pointer-index.ts';
 import { findDuplicateLearning } from '../../learn/dedup.ts';
 import { LEARNING_FILE_OUTSIDE_ROOT, commitRowsOrRemoveFile } from '../../learn/commit-file-write.ts';
 import { conceptsFrom, learningContent, slugFor } from './content.ts';
+import { normalizeProject, extractProjectFromSource } from '../../tools/learn-support.ts';
+import { detectProject } from '../../server/project-detect.ts';
 import {
   INVALID_LEARNING_ID,
   INVALID_LEARNING_SOURCE_FILE,
@@ -119,7 +121,13 @@ export function createLearning(body: LearnCreateBody) {
   const now = Date.now();
   const concepts = conceptsFrom(body.concepts);
   const tenantId = tenantIdForWrite();
-  const project = body.project?.toLowerCase() ?? null;
+  // Host-qualify to the canonical github.com/owner/repo tag (mirror the MCP oracle_learn path in
+  // tools/learn.ts) so a variant input (bare slug / owner-repo / wrong host) can't persist and
+  // fragment the project — BL-223. memoryOwnerRoot (the caller's seat root) is the authoritative
+  // last resort via detectProject.
+  const project = normalizeProject(body.project ?? undefined)
+    ?? extractProjectFromSource(body.source)
+    ?? (body.memoryOwnerRoot ? detectProject(body.memoryOwnerRoot) : null);
   const duplicate = findDuplicateLearning(sqlite, { pattern, tenantId, project });
   if (duplicate) {
     return {
@@ -180,7 +188,7 @@ function updateLearning(id: string, body: LearnUpdateBody) {
   }
   if (body.concepts !== undefined) set.concepts = JSON.stringify(conceptsFrom(body.concepts));
   if (body.origin !== undefined) set.origin = body.origin;
-  if (body.project !== undefined) set.project = body.project?.toLowerCase() ?? null;
+  if (body.project !== undefined) set.project = normalizeProject(body.project ?? undefined) ?? (body.project?.toLowerCase() ?? null);
   if (body.supersededBy !== undefined) set.supersededBy = body.supersededBy;
   if (body.supersededReason !== undefined) set.supersededReason = body.supersededReason;
   const nextConcepts = body.concepts === undefined ? conceptsFrom(existing.concepts) : conceptsFrom(body.concepts);

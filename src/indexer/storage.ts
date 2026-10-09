@@ -15,6 +15,7 @@ import { chunkDocumentsForIndexing } from './chunker.ts';
 import { replaceDocumentPointersBulk, type PointerInput } from '../search/pointer-index.ts';
 import type { VectorStoreAdapter } from '../vector/types.ts';
 import type { OracleDocument } from '../types.ts';
+import { normalizeProject } from '../tools/learn-support.ts';
 
 /** The synchronous transaction handle `storeDocuments` runs in. `opts.afterStore` receives it so a
  * caller can publish follow-up rows (e.g. supersede the stored files' legacy rows) in the SAME
@@ -55,8 +56,15 @@ export async function storeDocuments(
 
   db.transaction((tx) => {
     for (const doc of storedDocuments) {
-      // SQLite metadata - use doc.project if available, fall back to repo project
-      const docProject = (doc.project || project)?.toLowerCase();
+      // SQLite metadata — host-qualify to the canonical github.com/owner/repo tag so a raw
+      // frontmatter project (bare slug or owner/repo) can't persist as a variant and fragment
+      // the project (BL-223). A host-qualified per-doc project still wins; otherwise fall back to
+      // the (already detectProject-normalized) repo project. Recovery writes (insertOnly, e.g.
+      // orphan-rescue) are EXEMPT — they must preserve the exact identity the plan fingerprinted.
+      const rawDocProject = (doc.project || project)?.toLowerCase() ?? null;
+      const docProject = opts.insertOnly
+        ? rawDocProject
+        : (normalizeProject(doc.project ?? undefined) ?? normalizeProject(project ?? undefined) ?? rawDocProject);
 
       const insertValues = {
         id: doc.id,
