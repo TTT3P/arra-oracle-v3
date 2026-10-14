@@ -5,8 +5,8 @@
  * the consumers care about:
  *   1. ORACLE_RETRIEVE_DEPTH must NOT shadow an explicitly-set legacy ORACLE_SEARCH_RETRIEVE_DEPTH
  *      (src/search/retrieve-depth.ts:4-6 reads both).
- *   2. OLLAMA_FALLBACK_BASE_URLS must distinguish unset (→ default :11434) from explicit-empty
- *      (deliberate no-fallback, must stay empty — src/vector/ollama-url-chain.ts:21).
+ *   2. OLLAMA_FALLBACK_BASE_URLS: unset → NO fallback (empty) since BL-B removed the dead :11435
+ *      tunnel as auto-fallback; an explicit value is preserved — src/vector/ollama-url-chain.ts:21.
  *
  * We drive each real launcher and intercept its final `exec "$BUN_BIN" …` via the ARRA_BUN_BIN
  * hook, pointing it at a stub that prints `env`. No bun/MCP server is started.
@@ -64,14 +64,14 @@ for (const [name, script] of [['owner', OWNER], ['read-mostly', READ_MOSTLY]] as
       expect(env.ORACLE_RETRIEVE_DEPTH).toBe('42');
     });
 
-    test('unset OLLAMA_FALLBACK_BASE_URLS → defaults to the GPU tunnel fallback (BL-229)', () => {
+    test('unset OLLAMA_FALLBACK_BASE_URLS → NO fallback (empty); :11434-only (BL-B, TINE 2026-10-15)', () => {
       const env = runLauncher(script, {});
-      expect(env.OLLAMA_FALLBACK_BASE_URLS).toBe('http://127.0.0.1:11435');
+      expect(env.OLLAMA_FALLBACK_BASE_URLS).toBe(''); // dead :11435 tunnel removed as auto-fallback
     });
 
-    test('explicit EMPTY OLLAMA_FALLBACK_BASE_URLS stays empty (no-fallback preserved)', () => {
-      const env = runLauncher(script, { OLLAMA_FALLBACK_BASE_URLS: '' });
-      expect(env.OLLAMA_FALLBACK_BASE_URLS).toBe(''); // present but empty, NOT clobbered to a default
+    test('explicit OLLAMA_FALLBACK_BASE_URLS is preserved (e.g. a deliberate :11435 drain burst)', () => {
+      const env = runLauncher(script, { OLLAMA_FALLBACK_BASE_URLS: 'http://127.0.0.1:11435' });
+      expect(env.OLLAMA_FALLBACK_BASE_URLS).toBe('http://127.0.0.1:11435'); // explicit NOT clobbered
     });
 
     test('OLLAMA_BASE_URL defaults to the Mac CPU :11434 (BL-229, TINE 2026-10-09)', () => {
