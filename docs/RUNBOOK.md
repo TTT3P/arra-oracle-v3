@@ -204,6 +204,51 @@ launchd-managed process and must not be used as a restart path while launchd own
   direct TINE approval. NEVER run `src/indexer/cli.ts` with a narrowed
   `--repo-root` expecting a scoped delete — see the 2026-08-16 post-mortem
   (`learning_2026-08-16_post-mortem-oracle-db-smart-delete-incident-2026-2`).
+- **In-place column UPDATE — single-writer gate is "no other WRITER", NOT the §5 "zero
+  holders" gate** (ORA-BL223B-20261105; receipts
+  `oracle-maint-oracle/ψ/findings/2026-11-05_BL-223-stepb-backfill-0{1,2}-OPEN-receipt.md`).
+  A pure in-place `UPDATE` of a tag column (e.g. backfilling `project`) — no `.db` inode
+  replacement, no file move, no reindex, no vector write, no supersede, no delete — is **not**
+  a file swap, so §5's "`lsof` must print NOTHING / ANY holder counts" gate **does not apply
+  here**. SQLite WAL permits exactly **1 writer + N readers**, so correctness requires only
+  that no OTHER process can write pages while the operator writes; the per-seat MCP readers may
+  stay attached and **must not be stopped** (they are maw-maint's, not oracle-maint's, and are
+  read-only by construction: `src/mcp/server.ts:165-168` opens `readonly` when
+  `oracleApiBase`/`readOnly` is set, `src/storage/drizzle-sqlite.ts:85-91` — a readonly
+  connection cannot write `db`/`wal`).
+  - **Why reusing the §5 gate is wrong online**: the fleet's `bin/mcp.ts` readers hold
+    `oracle.db` continuously, so "`lsof` prints NOTHING" is **unachievable** while the fleet
+    runs. The first BL-223b window FAILED-before-write (`cee916f`) on exactly this mistake —
+    the §5 file-swap gate was inherited literally into an in-place UPDATE. Do **not** reuse the
+    §5 gate for an in-place UPDATE.
+  - **The reader-tolerant gate** (independent review: riddler GO `57a885d`,
+    `riddler-oracle/reports/2026-11-05-bl223b-57a885d-writer-gate.md`; applied clean at
+    `c14aee8`):
+    1. `launchctl bootout` core (`com.tt3p.arra-oracle`) + vector (`com.tt3p.arra-vector`) —
+       section 3 order; confirm listeners gone and
+       `sqlite3 -readonly …/oracle.db "SELECT is_indexing FROM indexing_status WHERE id=1;"` = 0
+       (the indexer is a core-internal job, down with the core).
+    2. Capture a **fresh** `lsof ~/.arra-oracle-v2/oracle.db ~/.arra-oracle-v2/oracle.db-wal`:
+       there must be **NO write-mode (`u`/`w`) fd** on `oracle.db` or `oracle.db-wal`; only read
+       (`r`) fds (seat readers) remain. ANY unexplained writable `db`/`wal` fd = unaccounted
+       writer → restart, abort, FAILED. (`-shm` may show `u` for WAL lock coordination; it is
+       not a page writer — inspect only `oracle.db` and `oracle.db-wal`.) `lsof` is point-in-time
+       evidence, not a lock, and historical PIDs are not identity.
+    3. Wrap the UPDATE in **`BEGIN IMMEDIATE`** — this is the real write-exclusion.
+       `SQLITE_BUSY`/any lock error = a competing writer exists = **STOP → FAILED**; never bypass
+       the gate or kill seats. Use `.timeout` + `.bail on` with CHECK-table asserts so any count
+       mismatch raises before `COMMIT` and the open transaction rolls back on exit.
+    4. **In-window rollback = surgical, conflict-guarded, fail-closed `SET` back to the prior
+       value** under the same reader-tolerant gate (abort before writing on any missing /
+       superseded / changed-value row). A **Type B full `.db` restore is NOT reader-safe** and
+       stays zero-holder-gated under §5 — never use it to undo an in-place UPDATE while readers
+       are attached; if a full restore is ever genuinely needed, STOP and coordinate a separate
+       authorized zero-holder window (never restore over readers, kill seats, or remove
+       WAL/SHM).
+    5. Hold the lease + no-unaccounted-writer admission across the whole window
+       (gate → apply → acceptance); restart in section 3/6 order; owner-read smoke uses a
+       **fresh** read transaction after commit (an already-open WAL read txn keeps its old
+       snapshot). Section 2 health + exact acceptance remain required.
 
 ## 5. Backup & restore
 
@@ -240,6 +285,13 @@ section 2 and compare counts — they must match exactly:
 sqlite3 -readonly <backup.db> "SELECT count(*) FROM oracle_documents;"
 sqlite3 -readonly ~/.arra-oracle-v2/oracle.db "SELECT count(*) FROM oracle_documents;"
 ```
+
+**Not for in-place UPDATEs.** The `lsof`-empty gate above (line "GATE: must print NOTHING")
+is the *file-swap* gate: the whole `.db` inode is replaced, so any open fd would keep reading
+the old file and every holder must exit first. A pure in-place column `UPDATE` replaces no
+inode and uses the **reader-tolerant "no other WRITER" gate in section 4**, not this one.
+Reusing this gate for an in-place UPDATE is unachievable online (seat MCP readers never release
+`oracle.db`) and caused FAILED-before-write `cee916f` (ORA-BL223B-20261105-BACKFILL-01).
 
 ## 6. Fresh install
 
